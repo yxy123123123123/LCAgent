@@ -1,0 +1,7 @@
+group: "G0"
+name: "no_rag"
+rag_enabled: false
+storage_mode: "none"
+chunking_mode: "none"
+routing_mode: "disabled"
+

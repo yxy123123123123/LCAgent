@@ -1,0 +1,51 @@
+{
+  "catalog_version": "envmodels-filesystem-v1",
+  "generated_at": "2026-08-12T11:13:03.440178+00:00",
+  "source_root": "E:\\UE_project\\LandscapeTool\\Content\\EnvModels",
+  "mount_mapping": {
+    "E:\\UE_project\\LandscapeTool\\Content\\EnvModels": "/Game/EnvModels"
+  },
+  "file_count": 4642,
+  "total_bytes": 28667607495,
+  "extension_counts": {
+    ".fbx": 2,
+    ".jpg": 2,
+    ".uasset": 4627,
+    ".umap": 11
+  },
+  "inferred_asset_type_counts": {
+    "audio_candidate": 69,
+    "blueprint_candidate": 134,
+    "foliage_candidate": 8,
+    "map": 11,
+    "material_candidate": 262,
+    "material_instance_candidate": 1707,
+    "mesh_candidate": 285,
+    "source_file": 4,
+    "texture_candidate": 2095,
+    "unclassified_uasset": 67
+  },
+  "top_folder_counts": {
+    "Airports": 26,
+    "Building": 1005,
+    "Clutter": 276,
+    "FourSeason": 292,
+    "Global_Base": 118,
+    "LandScape": 28,
+    "Lights": 9,
+    "M4": 1274,
+    "Rail": 11,
+    "Roads": 93,
+    "Rocks": 46,
+    "Vegetation": 1414,
+    "Water_Features": 50
+  },
+  "file_hashes_computed": false,
+  "limitations": [
+    "未启动Unreal Engine，因此无法从Asset Registry获得真实AssetClass、GeneratedClass或依赖关系。",
+    "ue_object_path_candidate由Content挂载规则推导，不等于已验证的Actor/Blueprint类路径。",
+    "Blueprint的ue_generated_class_path_candidate按_Name_C规则推导，仍需Asset Registry或运行时核实。",
+    "全部文件均登记，但只有candidate_for_plugin_path=true的记录可进入插件路径候选。",
+    "index_admission=true表示记录可供资源检索；不表示其候选对象路径可直接作为actor_path。"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0",
+  "task_id": "resource_demo_001",
+  "conversation_id": null,
+  "turn_id": 1,
+  "plan_mode": "full_snapshot",
+  "coordinate_system": {
+    "system": "unreal_world",
+    "unit": "cm",
+    "axis": "left_handed_z_up"
+  },
+  "objects": [
+    {
+      "object_id": "coastal_road_01",
+      "object_type": "road",
+      "operation": "create",
+      "commands": [
+        {
+          "type": "RoadAuto",
+          "params": {
+            "command_type": "Actor",
+            "actor_path": "/Game/ThirdParty/Road_Creator_Pro/Blueprints/BP_Road_Creator.BP_Road_Creator"
+          }
+        },
+        {
+          "type": "RoadAuto",
+          "params": {
+            "command_type": "Points",
+            "positions": [
+              {"x": 0, "y": 0, "z": 0},
+              {"x": 10000, "y": 0, "z": 0}
+            ]
+          }
+        },
+        {
+          "type": "RoadAuto",
+          "params": {"command_type": "Execute"}
+        }
+      ]
+    }
+  ]
+}

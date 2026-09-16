@@ -1,0 +1,40 @@
+experiment_version: "0.1.0"
+schema_version: "1.0"
+knowledge_version: "draft-v1"
+prompt_version: "v1"
+
+model:
+  base_url_env: "LLM_BASE_URL"
+  api_key_env: "LLM_API_KEY"
+  model_env: "LLM_MODEL"
+  default_base_url: "https://api.deepseek.com"
+  default_model: "deepseek-chat"
+  temperature: 0
+  top_p: 1
+  max_tokens: 4096
+  timeout_seconds: 120
+  max_retries: 0
+
+embedding:
+  base_url_env: "EMBEDDING_BASE_URL"
+  api_key_env: "EMBEDDING_API_KEY"
+  model_env: "EMBEDDING_MODEL"
+  default_model: "text-embedding-v4"
+  timeout_seconds: 120
+  max_retries: 0
+
+retrieval:
+  top_k: 3
+  final_context_max_chars: 12000
+  distance_metric: "cosine"
+
+uniform_chunking:
+  chunk_size: 400
+  chunk_overlap: 80
+
+paths:
+  corpus_root: "corpus"
+  indexes_root: "indexes"
+  outputs_root: "outputs"
+  schema_path: "schemas/scene_plan.schema.json"
+  plugin_contract_path: "schemas/ue_plugin_contract.json"

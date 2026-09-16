@@ -1,0 +1,14 @@
+# LCAgent 依赖
+# 安装：pip install -r requirements.txt
+
+openai>=2.0.0
+langchain-community>=0.4.0
+langchain-text-splitters>=1.1.0
+langchain-chroma>=1.1.0
+chromadb>=1.5.0
+click>=8.0.0
+python-dotenv>=1.2.0
+PyYAML>=6.0.0
+jsonschema>=4.20.0
+pypdf>=6.0.0
+streamlit>=1.36.0

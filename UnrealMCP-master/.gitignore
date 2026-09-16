@@ -1,0 +1,19 @@
+# Unreal Engine Plugin Ignores
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+Logs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.pdb
+
+# Python modules
+MCP/python_modules/
+MCP/__pycache__/
+MCP/Commands/__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class

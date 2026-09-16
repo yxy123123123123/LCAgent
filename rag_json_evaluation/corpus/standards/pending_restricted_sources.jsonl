@@ -1,0 +1,6 @@
+{"standard_id":"GJB-6787-2009","title":"军用建模与仿真模型校核、验证与确认通用要求","knowledge_type":"standard_source_metadata","availability":"full_text_not_provided","ingest_allowed":false,"reason":"论文直接引用，但当前工作区没有用户授权全文；不得用网络摘要替代标准正文。"}
+{"standard_id":"GJB-7566-2012","title":"战术级作战仿真环境构建要求","knowledge_type":"standard_source_metadata","availability":"full_text_not_provided","ingest_allowed":false,"reason":"论文直接引用，但当前工作区没有用户授权全文；不得用网络摘要替代标准正文。"}
+{"standard_id":"ARMY-ENGINEERING-UNIVERSITY-2025","title":"战术级战场环境建模与仿真规范","knowledge_type":"standard_source_metadata","availability":"full_text_not_provided","ingest_allowed":false,"reason":"论文称为2025年内部/报告类资料，当前未提供原文。"}
+{"standard_id":"MILITARY-SIMULATION-TERMS","title":"军用仿真术语","knowledge_type":"standard_source_metadata","availability":"exact_standard_number_unknown","ingest_allowed":false,"reason":"论文未给出准确标准号和版本，需要作者确认。"}
+{"standard_id":"MILITARY-INFO-SYSTEM-MS-GENERAL","title":"军事信息系统建模和仿真通用要求","knowledge_type":"standard_source_metadata","availability":"exact_standard_number_unknown","ingest_allowed":false,"reason":"论文未给出准确标准号和版本，需要作者确认。"}
+{"standard_id":"LOCAL-CLI-MANUAL","title":"CLI渲染工具操作手册","knowledge_type":"standard_source_metadata","availability":"author_document_missing","ingest_allowed":false,"reason":"应由插件团队根据UnrealMCP-master源码和实际资产版本编写，不能从公网替代。"}

@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.lcagent/schemas/scene-plan-1.0.json",
+  "title": "LCAgent Offline ScenePlan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "conversation_id",
+    "turn_id",
+    "plan_mode",
+    "coordinate_system",
+    "objects"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task_id": {"type": "string", "minLength": 1},
+    "conversation_id": {"type": ["string", "null"]},
+    "turn_id": {"type": "integer", "minimum": 1},
+    "plan_mode": {"const": "full_snapshot"},
+    "coordinate_system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "unit", "axis"],
+      "properties": {
+        "system": {"const": "unreal_world"},
+        "unit": {"const": "cm"},
+        "axis": {"const": "left_handed_z_up"}
+      }
+    },
+    "objects": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sceneObject"}
+    }
+  },
+  "$defs": {
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "z": {"type": "number"}
+      }
+    },
+    "sceneObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_id", "object_type", "operation", "commands"],
+      "properties": {
+        "object_id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"},
+        "object_type": {"enum": ["terrain", "road", "river", "building_area"]},
+        "operation": {"enum": ["create", "retain", "modify", "delete"]},
+        "commands": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pluginCommand"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"operation": {"enum": ["create", "modify"]}}},
+          "then": {"properties": {"commands": {"minItems": 1}}}
+        }
+      ]
+    },
+    "pluginCommand": {
+      "oneOf": [
+        {"$ref": "#/$defs/landscapeDem"},
+        {"$ref": "#/$defs/landscapeMaterial"},
+        {"$ref": "#/$defs/landscapeExecute"},
+        {"$ref": "#/$defs/roadActor"},
+        {"$ref": "#/$defs/roadLayer"},
+        {"$ref": "#/$defs/roadPoints"},
+        {"$ref": "#/$defs/roadWidth"},
+        {"$ref": "#/$defs/roadExecute"},
+        {"$ref": "#/$defs/riverActor"},
+        {"$ref": "#/$defs/riverLayer"},
+        {"$ref": "#/$defs/riverPoints"},
+        {"$ref": "#/$defs/riverWidth"},
+        {"$ref": "#/$defs/riverExecute"},
+        {"$ref": "#/$defs/buildActor"},
+        {"$ref": "#/$defs/buildLayer"},
+        {"$ref": "#/$defs/buildPoints"},
+        {"$ref": "#/$defs/buildExecute"}
+      ]
+    },
+    "commandEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "params"],
+      "properties": {
+        "type": {},
+        "params": {}
+      }
+    },
+    "landscapeDem": {
+      "allOf": [
+        {"$ref": "#/$defs/commandEnvelope"},
+        {"properties": {"type": {"const": "Landscaping"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "file_paths"], "properties": {"command_type": {"const": "DEM"}, "file_paths": {"type": "string", "minLength": 1}}}}}
+      ]
+    },
+    "landscapeMaterial": {
+      "allOf": [
+        {"$ref": "#/$defs/commandEnvelope"},
+        {"properties": {"type": {"const": "Landscaping"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "material_path"], "properties": {"command_type": {"const": "Set_Material"}, "material_path": {"type": "string", "minLength": 1}}}}}
+      ]
+    },
+    "landscapeExecute": {
+      "allOf": [
+        {"$ref": "#/$defs/commandEnvelope"},
+        {"properties": {"type": {"const": "Landscaping"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type"], "properties": {"command_type": {"const": "Execute"}}}}}
+      ]
+    },
+    "roadActor": {"$ref": "#/$defs/roadActorInline"},
+    "roadActorInline": {
+      "allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RoadAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "actor_path"], "properties": {"command_type": {"const": "Actor"}, "actor_path": {"type": "string", "minLength": 1}}}}}]
+    },
+    "roadLayer": {
+      "allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RoadAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "layer_path"], "properties": {"command_type": {"const": "Paint_Layer"}, "layer_path": {"type": "string", "minLength": 1}}}}}]
+    },
+    "roadPoints": {
+      "allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RoadAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "positions"], "properties": {"command_type": {"const": "Points"}, "positions": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/vector"}}}}}}]
+    },
+    "roadWidth": {
+      "allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RoadAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "width"], "properties": {"command_type": {"const": "Width"}, "width": {"type": "number", "exclusiveMinimum": 0}}}}}]
+    },
+    "roadExecute": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RoadAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type"], "properties": {"command_type": {"const": "Execute"}}}}}]},
+    "riverActor": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RiverAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "actor_path"], "properties": {"command_type": {"const": "Actor"}, "actor_path": {"type": "string", "minLength": 1}}}}}]},
+    "riverLayer": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RiverAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "layer_path"], "properties": {"command_type": {"const": "Paint_Layer"}, "layer_path": {"type": "string", "minLength": 1}}}}}]},
+    "riverPoints": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RiverAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "positions"], "properties": {"command_type": {"const": "Points"}, "positions": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/vector"}}}}}}]},
+    "riverWidth": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RiverAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "width"], "properties": {"command_type": {"const": "Width"}, "width": {"type": "number", "exclusiveMinimum": 0}}}}}]},
+    "riverExecute": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "RiverAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type"], "properties": {"command_type": {"const": "Execute"}}}}}]},
+    "buildActor": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "BuildAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "actor_path"], "properties": {"command_type": {"const": "Actor"}, "actor_path": {"type": "string", "minLength": 1}}}}}]},
+    "buildLayer": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "BuildAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "layer_path"], "properties": {"command_type": {"const": "Paint_Layer"}, "layer_path": {"type": "string", "minLength": 1}}}}}]},
+    "buildPoints": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "BuildAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type", "positions"], "properties": {"command_type": {"const": "Points"}, "positions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/vector"}}}}}}]},
+    "buildExecute": {"allOf": [{"$ref": "#/$defs/commandEnvelope"}, {"properties": {"type": {"const": "BuildAuto"}, "params": {"type": "object", "additionalProperties": false, "required": ["command_type"], "properties": {"command_type": {"const": "Execute"}}}}}]}
+  }
+}

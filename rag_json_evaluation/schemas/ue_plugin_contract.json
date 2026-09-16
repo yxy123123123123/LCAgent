@@ -1,0 +1,51 @@
+{
+  "contract_version": "1.0",
+  "source": "UnrealMCP-master/Source/UnrealMCP",
+  "coordinate_fields": ["x", "y", "z"],
+  "notes": [
+    "Field names are case-sensitive in the offline contract; uppercase X/Y/Z are rejected.",
+    "The Unreal server accepts one command object per TCP message.",
+    "ScenePlan commands are sent sequentially by a separate executor in online mode.",
+    "This contract records source-level field requirements. Task-specific military constraints belong in the benchmark rule set."
+  ],
+  "handlers": {
+    "Landscaping": {
+      "commands": {
+        "DEM": {"required": {"file_paths": "string"}},
+        "Set_Material": {"required": {"material_path": "string"}},
+        "Execute": {"required": {}}
+      },
+      "recommended_order": ["DEM", "Set_Material", "Execute"]
+    },
+    "RoadAuto": {
+      "commands": {
+        "Actor": {"required": {"actor_path": "string"}},
+        "Paint_Layer": {"required": {"layer_path": "string"}},
+        "Points": {"required": {"positions": "vector_array"}},
+        "Width": {"required": {"width": "number"}},
+        "Execute": {"required": {}}
+      },
+      "recommended_order": ["Actor", "Paint_Layer", "Points", "Width", "Execute"]
+    },
+    "RiverAuto": {
+      "commands": {
+        "Actor": {"required": {"actor_path": "string"}},
+        "Paint_Layer": {"required": {"layer_path": "string"}},
+        "Points": {"required": {"positions": "vector_array"}},
+        "Width": {"required": {"width": "number"}},
+        "Execute": {"required": {}}
+      },
+      "recommended_order": ["Actor", "Paint_Layer", "Points", "Width", "Execute"]
+    },
+    "BuildAuto": {
+      "commands": {
+        "Actor": {"required": {"actor_path": "string"}},
+        "Paint_Layer": {"required": {"layer_path": "string"}},
+        "Points": {"required": {"positions": "vector_array"}},
+        "Execute": {"required": {}}
+      },
+      "recommended_order": ["Actor", "Paint_Layer", "Points", "Execute"]
+    }
+  }
+}
+

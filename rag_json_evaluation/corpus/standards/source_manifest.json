@@ -1,0 +1,102 @@
+{
+  "ingest_version": "official-pdf-sections-v1",
+  "record_count": 998,
+  "sources": [
+    {
+      "standard_id": "OGC-23-034",
+      "title": "OGC CDB Version 2 - Part 1: Core Standard",
+      "publisher": "Open Geospatial Consortium",
+      "version": "2.0",
+      "publication_date": "2026-01-06",
+      "source_url": "https://docs.ogc.org/is/23-034/23-034.pdf",
+      "scope_tags": [
+        "synthetic_environment",
+        "resource_path",
+        "metadata",
+        "crs",
+        "geometry",
+        "tiling",
+        "versioning"
+      ],
+      "source_file": "OGC_CDB_2.0_Core_23-034.pdf",
+      "source_sha256": "347353ae73081818ea4675ba030ff98e035a206c81086e0aa84ec2f2ecfe1068",
+      "bytes": 2492127,
+      "pdf_signature_valid": true,
+      "page_count": 116,
+      "extracted_section_count": 197,
+      "status": "ingested"
+    },
+    {
+      "standard_id": "OGC-15-112r4",
+      "title": "OGC CDB Terms and Definitions (Normative)",
+      "publisher": "Open Geospatial Consortium",
+      "version": "1.2",
+      "publication_date": "2021-02-26",
+      "source_url": "https://docs.ogc.org/is/15-112r4/15-112r4.pdf",
+      "scope_tags": [
+        "synthetic_environment",
+        "terminology",
+        "data_store"
+      ],
+      "source_file": "OGC_CDB_1.2_Terms_15-112r4.pdf",
+      "source_sha256": "e7a997f3a19864ca580d47d3b329e149d7045e561de10194281aa2289c34eb23",
+      "bytes": 375945,
+      "pdf_signature_valid": true,
+      "page_count": 26,
+      "extracted_section_count": 18,
+      "status": "ingested"
+    },
+    {
+      "standard_id": "OGC-20-010",
+      "title": "OGC CityGML 3.0 Part 1: Conceptual Model Standard",
+      "publisher": "Open Geospatial Consortium",
+      "version": "3.0.0",
+      "publication_date": "2021-09-13",
+      "source_url": "https://docs.ogc.org/is/20-010/20-010.pdf",
+      "scope_tags": [
+        "building",
+        "road",
+        "railway",
+        "bridge",
+        "waterbody",
+        "vegetation",
+        "terrain",
+        "lod",
+        "3d_city"
+      ],
+      "source_file": "OGC_CityGML_3.0_Conceptual_Model_20-010.pdf",
+      "source_sha256": "5f3c9ad4fa6dbb1be8d67e6cb2c6dd3e774d98f77c35703daa3cc32d7a6de578",
+      "bytes": 19229784,
+      "pdf_signature_valid": true,
+      "page_count": 463,
+      "extracted_section_count": 678,
+      "status": "ingested"
+    },
+    {
+      "standard_id": "OGC-19-008r4",
+      "title": "OGC GeoTIFF Standard",
+      "publisher": "Open Geospatial Consortium",
+      "version": "1.1",
+      "publication_date": "2019-09-14",
+      "source_url": "https://docs.ogc.org/is/19-008r4/19-008r4.pdf",
+      "scope_tags": [
+        "geotiff",
+        "dem",
+        "raster",
+        "crs",
+        "georeferencing"
+      ],
+      "source_file": "OGC_GeoTIFF_1.1_19-008r4.pdf",
+      "source_sha256": "664e0aeee57c04dd4308ade2e68e68a7824a866f6c4e268d73aed5994fdca87e",
+      "bytes": 2249218,
+      "pdf_signature_valid": true,
+      "page_count": 115,
+      "extracted_section_count": 105,
+      "status": "ingested"
+    }
+  ],
+  "limitations": [
+    "章节识别来自PDF文本层的编号标题规则，正式冻结前需抽样人工复核。",
+    "公开OGC资料只作为合成环境与地理空间技术依据，不替代论文列出的GJB和内部规范。"
+  ]
+}

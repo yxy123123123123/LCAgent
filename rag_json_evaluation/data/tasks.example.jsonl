@@ -1,0 +1,4 @@
+{"task_id":"resource_demo_001","category":"resource","conversation_id":null,"turn_id":1,"user_prompt":"创建一条海边道路，经过(0,0,0)和(10000,0,0)两个点。","gold_json_path":null,"constraint_ids":[],"tolerance_profile":"default"}
+{"task_id":"context_demo_001_t1","category":"context","conversation_id":"context_demo_001","turn_id":1,"user_prompt":"创建一条道路，入口位于(0,0,0)，道路经过(10000,0,0)。","gold_json_path":null,"constraint_ids":[],"tolerance_profile":"default"}
+{"task_id":"context_demo_001_t2","category":"context","conversation_id":"context_demo_001","turn_id":2,"user_prompt":"保持入口和已有道路不变，在道路北侧增加一处建筑区域。","gold_json_path":null,"constraint_ids":[],"tolerance_profile":"default"}
+

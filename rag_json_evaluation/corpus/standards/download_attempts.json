@@ -1,0 +1,43 @@
+{
+  "recorded_at": "2026-08-12",
+  "policy": "Only official or primary-source downloads are admitted into the corpus. Failed or metadata-only items are not indexed.",
+  "attempts": [
+    {
+      "title": "OGC CDB Version 2 - Part 1: Core Standard",
+      "url": "https://docs.ogc.org/is/23-034/23-034.pdf",
+      "status": "downloaded_and_ingested",
+      "local_file": "source_documents/OGC_CDB_2.0_Core_23-034.pdf"
+    },
+    {
+      "title": "OGC CDB Terms and Definitions, version 1.2",
+      "url": "https://docs.ogc.org/is/15-112r4/15-112r4.pdf",
+      "status": "downloaded_and_ingested",
+      "local_file": "source_documents/OGC_CDB_1.2_Terms_15-112r4.pdf"
+    },
+    {
+      "title": "OGC CityGML 3.0 Part 1: Conceptual Model Standard",
+      "url": "https://docs.ogc.org/is/20-010/20-010.pdf",
+      "status": "downloaded_and_ingested",
+      "local_file": "source_documents/OGC_CityGML_3.0_Conceptual_Model_20-010.pdf"
+    },
+    {
+      "title": "OGC GeoTIFF Standard 1.1",
+      "url": "https://docs.ogc.org/is/19-008r4/19-008r4.pdf",
+      "status": "downloaded_and_ingested",
+      "local_file": "source_documents/OGC_GeoTIFF_1.1_19-008r4.pdf"
+    },
+    {
+      "title": "OGC CDB 1.3 Implementation Guidance",
+      "url": "https://docs.ogc.org/guides/20-029r2/20-029r2.pdf",
+      "status": "not_downloaded_http_404",
+      "index_admission": false
+    },
+    {
+      "title": "MIL-STD-3022 Modeling and Simulation Verification, Validation, and Accreditation Documentation Templates",
+      "url": "https://quicksearch.dla.mil/",
+      "status": "official_metadata_found_transient_pdf_link_expired",
+      "index_admission": false,
+      "notes": "The DLA ASSIST metadata page was located, but no durable official PDF URL was available during this collection pass."
+    }
+  ]
+}
