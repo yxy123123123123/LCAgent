@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://landscape-tool.local/contracts/terrain_create.schema.json",
+  "title": "UnrealMCP atomic terrain creation command",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "request_id", "type", "params"],
+  "properties": {
+    "protocol_version": {"const": "1.0.0"},
+    "request_id": {"type": "string", "minLength": 1},
+    "type": {"const": "Landscaping"},
+    "params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_type", "file_paths", "material_path"],
+      "properties": {
+        "command_type": {"const": "Create"},
+        "file_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "(?i)\\.tiff?$"
+          }
+        },
+        "material_path": {
+          "type": "string",
+          "minLength": 7,
+          "pattern": "^/Game/"
+        }
+      }
+    }
+  }
+}

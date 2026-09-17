@@ -3,6 +3,7 @@ import re
 import click
 import inspect
 import ast
+import tempfile
 from openai import OpenAI
 from string import Template
 from typing import List, Callable, Tuple, Optional
@@ -19,6 +20,7 @@ from prompt_template import (
 )
 from RAG_path import retrieve as retrieve_path, VECTOR_DB_PATH as PATH_DB_PATH
 from RAG_memory import retrieve as retrieve_memory, VECTOR_DB_PATH as MEMORY_DB_PATH, save_conversation_to_rag
+from script_validation import validate_generated_python
 
 # 获取Agent.py所在目录（核心新增）
 AGENT_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -215,19 +217,46 @@ class CodingAgent(BaseAgent):
         self.agent_dir = AGENT_DIR
 
     def write_to_file(self, file_path: str, content: str) -> str:
-        """文件写入工具（符合编码规范）"""
+        """写入并自动校验编码智能体生成的任务脚本。"""
         try:
-            # 核心修改：若file_path是相对路径，自动拼接为Agent.py同级绝对路径
+            # 生成文件只能位于 LCA 目录，避免模型修改工程外的任意文件。
             if not os.path.isabs(file_path):
                 file_path = os.path.join(self.agent_dir, file_path)
-            # 确保目录存在
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            # 处理换行符转义
+            file_path = os.path.abspath(file_path)
+            if os.path.commonpath([self.agent_dir, file_path]) != self.agent_dir:
+                raise ValueError("编码智能体只能写入 LCA 目录")
+
+            protected_files = {
+                "Agent.py",
+                "create_terrain.py",
+                "terrain_client.py",
+                "script_validation.py",
+                "prompt_template.py",
+            }
+            if os.path.basename(file_path) in protected_files:
+                raise ValueError("编码智能体不能覆盖固定客户端或智能体核心文件")
+            if not os.path.basename(file_path).startswith("generated_"):
+                raise ValueError("生成脚本文件名必须以 generated_ 开头")
+
             content = content.replace("\\n", "\n")
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            print(f"\n📝 编码智能体：文件写入成功 -> {file_path}")
-            return f"文件写入成功：{file_path}"
+            if file_path.lower().endswith(".py"):
+                validate_generated_python(file_path, content)
+
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            # 先写临时文件再原子替换，校验或写入失败时不会破坏上一版脚本。
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=os.path.dirname(file_path),
+                delete=False,
+                suffix=".tmp",
+            ) as temporary_file:
+                temporary_file.write(content)
+                temporary_path = temporary_file.name
+            os.replace(temporary_path, file_path)
+
+            print(f"\n📝 编码智能体：文件写入并通过自动校验 -> {file_path}")
+            return f"文件写入并通过自动校验：{file_path}"
         except Exception as e:
             error_msg = f"编码智能体-文件写入失败：{str(e)}"
             print(f"\n❌ {error_msg}")

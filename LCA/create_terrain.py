@@ -1,103 +1,72 @@
-import socket
-import json
-import time
+"""地形创建命令行入口。
+
+该文件可以由决策智能体直接执行；网络协议和错误处理统一放在
+terrain_client.py 中，避免编码智能体重复生成不一致的 Socket 代码。
+"""
+
+from __future__ import annotations
+
 import argparse
+import json
+import sys
+
+from terrain_client import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_RESPONSE_TIMEOUT,
+    TerrainClientError,
+    build_terrain_command,
+    create_terrain,
+)
 
 
-def send_mcp_command(command_type, params):
-    """
-    通过MCP协议向Unreal Engine发送命令
-    
-    Args:
-        command_type: 命令类型字符串
-        params: 参数字典
-    
-    Returns:
-        响应字符串
-    """
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="使用一个或多个 TIF 文件创建 UE 地形")
+    parser.add_argument("--file-paths", required=True, nargs="+", help="TIF/TIFF 高程文件路径")
+    parser.add_argument("--material-path", required=True, help="/Game/ 下的 UE 材质对象路径")
+    parser.add_argument("--host", default=DEFAULT_HOST, help="UnrealMCP 主机地址")
+    parser.add_argument("--port", default=DEFAULT_PORT, type=int, help="UnrealMCP 端口")
+    parser.add_argument("--connect-timeout", default=DEFAULT_CONNECT_TIMEOUT, type=float)
+    parser.add_argument("--response-timeout", default=DEFAULT_RESPONSE_TIMEOUT, type=float)
+    parser.add_argument("--request-id", help="可选的请求标识")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只校验并打印最终 JSON，不连接 Unreal Engine",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     try:
-        # 创建TCP连接
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect(('localhost', 13377))
-        
-        # 构建命令JSON
-        command = {
-            "type": "Landscaping",
-            "params": {
-                "command_type": command_type,
-                **params
-            }
-        }
-        
-        # 发送命令
-        json_data = json.dumps(command).encode('utf-8')
-        sock.sendall(json_data)
-        
-        # 接收响应
-        response = b""
-        sock.settimeout(5)
-        max_total_timeout = 300
-        start_time = time.time()
-        
-        while time.time() - start_time < max_total_timeout:
-            try:
-                data = sock.recv(4096)
-                if not data:
-                    break
-                response += data
-                start_time = time.time()
-            except socket.timeout:
-                if response:
-                    break
-        
-        sock.close()
-        return response.decode('utf-8') if response else "No response received"
-    
-    except Exception as e:
-        return f"Error: {str(e)}"
+        # 离线模式用于自动评测编码智能体生成的参数和最终 JSON。
+        if args.dry_run:
+            command = build_terrain_command(
+                args.file_paths,
+                args.material_path,
+                request_id=args.request_id,
+            )
+            print(json.dumps(command, ensure_ascii=False, indent=2))
+            return 0
 
-
-def create_terrain(file_paths, material_path):
-    """
-    根据高程数据文件创建地形并应用材质
-    
-    Args:
-        file_paths: 高程数据文件路径列表
-        material_path: 材质路径字符串
-    
-    Returns:
-        执行结果字符串
-    """
-    print("开始创建地形...")
-    
-    # 关键修改：将文件路径列表转为分号分隔的字符串
-    file_paths_str = ";".join(file_paths)
-    # 导入高程数据（传递字符串而非列表）
-    dem_result = send_mcp_command("DEM", {"file_paths": file_paths_str})
-    print(f"高程数据导入结果: {dem_result}")
-    
-    # 设置材质
-    material_result = send_mcp_command("Set_Material", {"material_path": material_path})
-    print(f"材质设置结果: {material_result}")
-    
-    # 执行地形创建
-    execute_result = send_mcp_command("Execute", {})
-    print(f"地形创建执行结果: {execute_result}")
-
-    return "地形创建流程完成"
+        response = create_terrain(
+            args.file_paths,
+            args.material_path,
+            request_id=args.request_id,
+            host=args.host,
+            port=args.port,
+            connect_timeout=args.connect_timeout,
+            response_timeout=args.response_timeout,
+        )
+        print(json.dumps(response, ensure_ascii=False, indent=2))
+        return 0
+    except TerrainClientError as exc:
+        # 失败必须返回非零退出码，决策智能体不能再把失败误判为完成。
+        print(json.dumps({"status": "error", "message": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    # 解析命令行参数
-    parser = argparse.ArgumentParser(description="根据高程数据文件创建地形并应用材质")
-    parser.add_argument("--file-paths", required=True, nargs='+', 
-                       help="高程数据文件路径，支持多个文件")
-    parser.add_argument("--material-path", required=True, 
-                       help="材质路径")
-    
-    args = parser.parse_args()
-    
-    # 执行地形创建
-    result = create_terrain(file_paths=args.file_paths, 
-                           material_path=args.material_path)
-    print(result)
+    raise SystemExit(main())
