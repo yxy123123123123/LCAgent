@@ -625,6 +625,12 @@ class LCAgentService:
             "capabilities": list(info.capabilities),
             "legacy_fallback": info.legacy_fallback,
             "contract_supported": info.contract_supported,
+            "scene_query": {
+                "supported_fields": list(info.scene_query_supported_fields),
+                "supported_filters": list(info.scene_query_supported_filters),
+                "supports_pagination": info.scene_query_supports_pagination,
+                "max_page_size": info.scene_query_max_page_size,
+            },
         }
 
     def scan_ue_assets(self, payload: Mapping[str, Any]) -> dict[str, Any]:

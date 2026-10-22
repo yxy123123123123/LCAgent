@@ -44,6 +44,9 @@ Intermediate/
 Saved/
 .vs/
 
+# UE 插件使用独立 Git 仓库管理，避免嵌套仓库误加入 LCAgent。
+/Plugins/
+
 # Electron client generated files
 desktop/node_modules/
 desktop/out/

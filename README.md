@@ -115,13 +115,13 @@ git clone https://github.com/yxy123123123123/LandscapeTool-Plugins.git E:\Temp\L
 5. 启动 UE，在“插件”中确认 UnrealMCP 及其依赖插件已启用；
 6. 重启编辑器，使 UnrealMCP 开始监听 `127.0.0.1:13377`。
 
-当前开发工程的可编辑插件位置是：
+当前直接用于编译测试的可编辑插件位置是：
 
 ```text
 E:\UE_project\LandscapeTool\Plugins
 ```
 
-`E:\LCAgent\UnrealMCP-master` 仅用于历史版本对照，不再作为可编辑插件源码。
+`E:\LCAgent\Plugins` 是用户提供的同步副本并使用独立 Git 仓库管理；本轮场景查询修改已经同步到两处。后续以实际 UE 工程中的插件为编译测试入口。`E:\LCAgent\UnrealMCP-master` 仅用于历史版本对照，不再作为可编辑插件源码。
 
 ## 6. 启动 Electron 客户端
 

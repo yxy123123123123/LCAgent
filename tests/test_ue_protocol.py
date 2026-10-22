@@ -46,7 +46,17 @@ class UEProtocolTests(unittest.TestCase):
                 "protocol_version": "1.0",
                 "server": "UnrealMCP",
                 "project_name": "LandscapeTool",
-                "capabilities": ["get_capabilities", "Landscaping"],
+                "capabilities": [
+                    "get_capabilities",
+                    "query_scene_state",
+                    "Landscaping",
+                ],
+                "scene_query": {
+                    "supports_pagination": True,
+                    "max_page_size": 1000,
+                    "supported_fields": ["identity", "transform"],
+                    "supported_filters": ["actor_name"],
+                },
             },
         }
         # 请求 id 是随机生成的，响应不带 id 时仍允许单次 TCP 兼容服务。
@@ -55,6 +65,9 @@ class UEProtocolTests(unittest.TestCase):
         self.assertTrue(info.contract_supported)
         self.assertEqual("LandscapeTool", info.project_name)
         self.assertIn("Landscaping", info.capabilities)
+        self.assertTrue(info.scene_query_supports_pagination)
+        self.assertEqual(1000, info.scene_query_max_page_size)
+        self.assertEqual(("identity", "transform"), info.scene_query_supported_fields)
 
     @patch("ue_protocol.send_mcp_command")
     def test_old_plugin_falls_back_to_read_only_scene_probe(self, send):

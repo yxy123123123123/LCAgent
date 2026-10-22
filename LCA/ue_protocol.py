@@ -63,6 +63,10 @@ class UECapabilities:
     project_name: str | None
     capabilities: tuple[str, ...] = field(default_factory=tuple)
     legacy_fallback: bool = False
+    scene_query_supported_fields: tuple[str, ...] = field(default_factory=tuple)
+    scene_query_supported_filters: tuple[str, ...] = field(default_factory=tuple)
+    scene_query_supports_pagination: bool = False
+    scene_query_max_page_size: int | None = None
 
     @property
     def contract_supported(self) -> bool:
@@ -198,12 +202,36 @@ class UEProtocolClient:
             isinstance(item, str) for item in capabilities
         ):
             raise UEProtocolError("UE 能力响应缺少 capabilities 数组")
+        scene_query = result.get("scene_query")
+        if scene_query is not None and not isinstance(scene_query, Mapping):
+            raise UEProtocolError("UE scene_query 能力说明必须是对象")
+        scene_query = dict(scene_query or {})
+        supported_fields = scene_query.get("supported_fields") or []
+        supported_filters = scene_query.get("supported_filters") or []
+        if not isinstance(supported_fields, list) or not all(
+            isinstance(item, str) for item in supported_fields
+        ):
+            raise UEProtocolError("UE scene_query.supported_fields 必须是字符串数组")
+        if not isinstance(supported_filters, list) or not all(
+            isinstance(item, str) for item in supported_filters
+        ):
+            raise UEProtocolError("UE scene_query.supported_filters 必须是字符串数组")
+        raw_max_page_size = scene_query.get("max_page_size")
+        max_page_size = int(raw_max_page_size) if raw_max_page_size is not None else None
+        if max_page_size is not None and max_page_size < 1:
+            raise UEProtocolError("UE scene_query.max_page_size 必须是正整数")
         return UECapabilities(
             contract_version=contract_version,
             protocol_version=str(result.get("protocol_version") or UE_ENVELOPE_VERSION),
             server=str(result.get("server") or "UnrealMCP"),
             project_name=str(result.get("project_name") or ""),
             capabilities=tuple(capabilities),
+            scene_query_supported_fields=tuple(supported_fields),
+            scene_query_supported_filters=tuple(supported_filters),
+            scene_query_supports_pagination=bool(
+                scene_query.get("supports_pagination", False)
+            ),
+            scene_query_max_page_size=max_page_size,
         )
 
     def _legacy_scene_probe(self) -> dict[str, Any]:
