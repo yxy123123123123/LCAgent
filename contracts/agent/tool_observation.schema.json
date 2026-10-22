@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lcagent.local/contracts/agent/tool_observation.schema.json",
+  "title": "LCAgent Tool Observation",
+  "type": "object",
+  "required": ["tool", "status", "result"],
+  "properties": {
+    "tool": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": ["success", "failed"]
+    },
+    "result": {},
+    "error": {
+      "type": ["object", "null"]
+    }
+  },
+  "additionalProperties": false
+}

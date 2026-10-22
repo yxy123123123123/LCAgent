@@ -16,12 +16,14 @@ from typing import Any, Mapping, Sequence
 
 import click
 
+from action_protocol import ActionProtocol
 from execution_runtime import ExecutionRuntime
 from knowledge_base import KnowledgeBaseManager
 from model_gateway import ModelGateway
 from prompt_template import decision_state_machine_prompt
 from resource_registry import ResourceRegistry
 from retrieval_service import RetrievalService
+from tool_registry import ToolEffect, ToolRegistry, ToolSpec
 
 
 class AgentState(str, Enum):
@@ -68,30 +70,6 @@ def _workspace_id(path: Path) -> str:
     return hashlib.sha256(str(path).casefold().encode("utf-8")).hexdigest()[:16]
 
 
-def _extract_json_object(text: str) -> dict[str, Any]:
-    """允许代码围栏，但拒绝标签式动作和非对象 JSON。"""
-
-    clean = text.strip()
-    if clean.startswith("```"):
-        lines = clean.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        clean = "\n".join(lines).strip()
-    decoder = json.JSONDecoder()
-    for start, character in enumerate(clean):
-        if character != "{":
-            continue
-        try:
-            value, _ = decoder.raw_decode(clean[start:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-    raise StateMachineError("模型输出不是有效的 JSON 对象")
-
-
 class DecisionAgent:
     """唯一使用聊天大模型的智能体。"""
 
@@ -113,6 +91,8 @@ class DecisionAgent:
         model_gateway: ModelGateway | None = None,
         retrieval_service: RetrievalService | None = None,
         execution_runtime: ExecutionRuntime | None = None,
+        action_protocol: ActionProtocol | None = None,
+        tool_registry: ToolRegistry | None = None,
         max_model_steps: int = 12,
         max_repairs: int = 3,
         dry_run: bool = True,
@@ -133,10 +113,18 @@ class DecisionAgent:
             retrieval_service = RetrievalService(knowledge, resources)
         self.retrieval_service = retrieval_service
         self.execution_runtime = execution_runtime or ExecutionRuntime()
+        self.action_protocol = action_protocol or ActionProtocol()
         self.max_model_steps = max_model_steps
         self.max_repairs = max_repairs
         self.dry_run = dry_run
         self._authorized_asset_paths: set[str] = set()
+        # 当前兼容阶段仍允许 execute_script；真正是否连接 UE 由 dry-run/live 运行时决定。
+        self._allowed_tool_effects = {
+            ToolEffect.READ_ONLY,
+            ToolEffect.LOCAL_WRITE,
+            ToolEffect.UE_WRITE,
+        }
+        self.tool_registry = tool_registry or self._build_tool_registry()
 
     def _runtime_context(self) -> str:
         try:
@@ -159,94 +147,215 @@ class DecisionAgent:
         return json.dumps(context, ensure_ascii=False, indent=2)
 
     @staticmethod
-    def _require_arguments(action: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
-        action_name = str(action.get("action") or "").strip()
-        arguments = action.get("arguments", {})
-        if not action_name:
-            raise StateMachineError("模型 JSON 缺少 action")
-        if not isinstance(arguments, dict):
-            raise StateMachineError("模型 JSON 的 arguments 必须是对象")
-        return action_name, dict(arguments)
-
-    @staticmethod
     def _text_argument(arguments: Mapping[str, Any], name: str) -> str:
         value = arguments.get(name)
         if not isinstance(value, str) or not value.strip():
             raise StateMachineError(f"动作参数 {name} 必须是非空字符串")
         return value.strip()
 
+    @staticmethod
+    def _object_output_schema() -> dict[str, Any]:
+        return {"type": "object"}
+
+    def _build_tool_registry(self) -> ToolRegistry:
+        """集中注册现有动作，使参数、提示词和调度共用同一事实来源。"""
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                name="search_assets",
+                description="从当前工作区已审核的 UE 资源注册表中检索资产路径",
+                input_schema={
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1},
+                        "asset_class": {"type": ["string", "null"]},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    },
+                    "additionalProperties": False,
+                },
+                output_schema=self._object_output_schema(),
+                effect=ToolEffect.READ_ONLY,
+                idempotent=True,
+                metadata={
+                    "trace_state": AgentState.RETRIEVE.value,
+                    "trace_argument_fields": ["query", "asset_class", "limit"],
+                },
+            ),
+            self._tool_search_assets,
+        )
+        registry.register(
+            ToolSpec(
+                name="search_knowledge",
+                description="使用选定的 Embedding 模型检索用户知识库",
+                input_schema={
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1},
+                        "kb_ids": {
+                            "type": ["array", "null"],
+                            "items": {"type": "string", "minLength": 1},
+                            "uniqueItems": True,
+                        },
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 50},
+                    },
+                    "additionalProperties": False,
+                },
+                output_schema=self._object_output_schema(),
+                effect=ToolEffect.READ_ONLY,
+                idempotent=True,
+                metadata={
+                    "trace_state": AgentState.RETRIEVE.value,
+                    "trace_argument_fields": ["query", "kb_ids", "top_k"],
+                },
+            ),
+            self._tool_search_knowledge,
+        )
+        registry.register(
+            ToolSpec(
+                name="write_script",
+                description="校验并原子写入 LCAgent 受控目录中的 generated_*.py 脚本",
+                input_schema={
+                    "type": "object",
+                    "required": ["filename", "content"],
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "pattern": r"^generated_[^/\\]+\.py$",
+                        },
+                        "content": {"type": "string", "minLength": 1},
+                    },
+                    "additionalProperties": False,
+                },
+                output_schema=self._object_output_schema(),
+                effect=ToolEffect.LOCAL_WRITE,
+                idempotent=False,
+                metadata={
+                    "trace_state": AgentState.GENERATE.value,
+                    "trace_argument_fields": ["filename"],
+                    "post_success_states": [AgentState.VALIDATE.value],
+                },
+            ),
+            self._tool_write_script,
+        )
+        registry.register(
+            ToolSpec(
+                name="execute_script",
+                description="执行已校验的 generated_*.py；dry-run/live 由运行时授权决定",
+                input_schema={
+                    "type": "object",
+                    "required": ["filename"],
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "pattern": r"^generated_[^/\\]+\.py$",
+                        },
+                        "argv": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 128,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                output_schema=self._object_output_schema(),
+                effect=ToolEffect.UE_WRITE,
+                idempotent=False,
+                metadata={
+                    "trace_state": AgentState.EXECUTE.value,
+                    "trace_argument_fields": ["filename"],
+                },
+            ),
+            self._tool_execute_script,
+        )
+        registry.register(
+            ToolSpec(
+                name="finish",
+                description="结束当前模型循环并向用户返回说明；不能替代后续场景目标验证",
+                input_schema={
+                    "type": "object",
+                    "required": ["answer"],
+                    "properties": {
+                        "answer": {"type": "string", "minLength": 1},
+                    },
+                    "additionalProperties": False,
+                },
+                effect=ToolEffect.READ_ONLY,
+                idempotent=True,
+                terminal=True,
+                metadata={"trace_state": AgentState.FINISH.value},
+            )
+        )
+        return registry
+
+    def _tool_search_assets(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        observation = self.retrieval_service.search_assets(
+            self._text_argument(arguments, "query"),
+            asset_class=arguments.get("asset_class"),
+            limit=int(arguments.get("limit", 10)),
+        )
+        for item in observation.get("results", []):
+            if isinstance(item, Mapping) and isinstance(item.get("object_path"), str):
+                self._authorized_asset_paths.add(item["object_path"])
+        return observation
+
+    def _tool_search_knowledge(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if not self.embedding_profile_id:
+            raise StateMachineError("未选择 Embedding 模型，无法检索知识库")
+        return self.retrieval_service.search_knowledge(
+            self._text_argument(arguments, "query"),
+            embedding_profile_id=self.embedding_profile_id,
+            kb_ids=arguments.get("kb_ids"),
+            top_k=int(arguments.get("top_k", 5)),
+        )
+
+    def _tool_write_script(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        filename = self._text_argument(arguments, "filename")
+        content = self._text_argument(arguments, "content")
+        self._verify_asset_paths_in_text(content)
+        return self.execution_runtime.write_generated_script(filename, content)
+
+    def _tool_execute_script(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        filename = self._text_argument(arguments, "filename")
+        argv = list(arguments.get("argv", []))
+        self._verify_asset_paths_in_text("\n".join(argv))
+        return self.execution_runtime.execute_generated_script(
+            filename,
+            argv,
+            dry_run=self.dry_run,
+        )
+
     def _dispatch(
         self, action_name: str, arguments: dict[str, Any]
     ) -> tuple[list[TraceStep], Any]:
         """执行单一结构化动作，并返回该动作内部的状态轨迹。"""
 
-        steps: list[TraceStep] = []
-        if action_name == "search_assets":
-            query = self._text_argument(arguments, "query")
-            limit = int(arguments.get("limit", 10))
-            asset_class = arguments.get("asset_class")
-            steps.append(
-                TraceStep(0, AgentState.RETRIEVE.value, action_name, "running", {"query": query})
+        registered = self.tool_registry.get(action_name)
+        metadata = registered.spec.metadata
+        trace_fields = metadata.get("trace_argument_fields", [])
+        detail = {key: arguments.get(key) for key in trace_fields if key in arguments}
+        detail["effect"] = registered.spec.effect.value
+        if action_name == "execute_script":
+            detail["dry_run"] = self.dry_run
+
+        steps: list[TraceStep] = [
+            TraceStep(
+                0,
+                str(metadata.get("trace_state") or AgentState.ANALYZE.value),
+                action_name,
+                "running",
+                detail,
             )
-            observation = self.retrieval_service.search_assets(
-                query,
-                asset_class=str(asset_class) if asset_class else None,
-                limit=limit,
-            )
-            for item in observation.get("results", []):
-                if isinstance(item, Mapping) and isinstance(item.get("object_path"), str):
-                    self._authorized_asset_paths.add(item["object_path"])
-        elif action_name == "search_knowledge":
-            if not self.embedding_profile_id:
-                raise StateMachineError("未选择 Embedding 模型，无法检索知识库")
-            query = self._text_argument(arguments, "query")
-            top_k = int(arguments.get("top_k", 5))
-            kb_ids = arguments.get("kb_ids")
-            if kb_ids is not None and not isinstance(kb_ids, list):
-                raise StateMachineError("kb_ids 必须是数组或 null")
-            steps.append(
-                TraceStep(0, AgentState.RETRIEVE.value, action_name, "running", {"query": query})
-            )
-            observation = self.retrieval_service.search_knowledge(
-                query,
-                embedding_profile_id=self.embedding_profile_id,
-                kb_ids=kb_ids,
-                top_k=top_k,
-            )
-        elif action_name == "write_script":
-            filename = self._text_argument(arguments, "filename")
-            content = self._text_argument(arguments, "content")
-            self._verify_asset_paths_in_text(content)
-            steps.append(
-                TraceStep(0, AgentState.GENERATE.value, action_name, "running", {"filename": filename})
-            )
-            # 写入函数内部先做 AST 校验，再原子替换文件。
-            observation = self.execution_runtime.write_generated_script(filename, content)
-            steps.append(
-                TraceStep(0, AgentState.VALIDATE.value, action_name, "success", observation)
-            )
-        elif action_name == "execute_script":
-            filename = self._text_argument(arguments, "filename")
-            argv = arguments.get("argv", [])
-            if not isinstance(argv, list):
-                raise StateMachineError("argv 必须是字符串数组")
-            self._verify_asset_paths_in_text("\n".join(str(item) for item in argv))
-            steps.append(
-                TraceStep(
-                    0,
-                    AgentState.EXECUTE.value,
-                    action_name,
-                    "running",
-                    {"filename": filename, "dry_run": self.dry_run},
-                )
-            )
-            observation = self.execution_runtime.execute_generated_script(
-                filename,
-                argv,
-                dry_run=self.dry_run,
-            )
-        else:
-            raise StateMachineError(f"不允许的动作：{action_name}")
+        ]
+        observation = self.tool_registry.execute(
+            action_name,
+            arguments,
+            allowed_effects=self._allowed_tool_effects,
+        )
+        for state in metadata.get("post_success_states", []):
+            steps.append(TraceStep(0, str(state), action_name, "success", observation))
         steps.append(
             TraceStep(0, AgentState.OBSERVE.value, action_name, "success", observation)
         )
@@ -283,7 +392,8 @@ class DecisionAgent:
         if not task:
             raise StateMachineError("任务不能为空")
         system_prompt = decision_state_machine_prompt.format(
-            runtime_context=self._runtime_context()
+            runtime_context=self._runtime_context(),
+            tool_catalog=self.tool_registry.render_prompt_catalog(),
         )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
@@ -306,14 +416,17 @@ class DecisionAgent:
             )
             reply = self.model_gateway.chat(messages, profile_id=self.model_profile_id)
             messages.append({"role": "assistant", "content": reply.content})
-            action: dict[str, Any] | None = None
+            action_name: str | None = None
             try:
-                action = _extract_json_object(reply.content)
-                action_name, arguments = self._require_arguments(action)
-                if action_name not in self.ALLOWED_ACTIONS:
-                    raise StateMachineError(f"不允许的动作：{action_name}")
-                if action_name == "finish":
-                    answer = self._text_argument(arguments, "answer")
+                action = self.action_protocol.parse(reply.content)
+                action_name = action.action
+                registered = self.tool_registry.validate_request(
+                    action_name,
+                    action.arguments,
+                    allowed_effects=self._allowed_tool_effects,
+                )
+                if registered.spec.terminal:
+                    answer = self._text_argument(action.arguments, "answer")
                     trace.append(
                         TraceStep(
                             len(trace) + 1,
@@ -325,7 +438,7 @@ class DecisionAgent:
                     )
                     return AgentRunResult(answer, trace, model_step, self.dry_run)
 
-                substeps, observation = self._dispatch(action_name, arguments)
+                substeps, observation = self._dispatch(action_name, action.arguments)
                 self._renumber(trace, substeps)
                 # 工具返回只作为用户可见 observation 输入，不混入系统指令。
                 messages.append(
@@ -338,11 +451,17 @@ class DecisionAgent:
             except Exception as exc:
                 repairs += 1
                 detail = {"error_type": type(exc).__name__, "message": str(exc)}
+                error_code = getattr(exc, "code", None)
+                if error_code:
+                    detail["code"] = error_code
+                error_details = getattr(exc, "details", None)
+                if error_details:
+                    detail["details"] = error_details
                 trace.append(
                     TraceStep(
                         len(trace) + 1,
                         AgentState.REPAIR.value,
-                        str(action.get("action")) if action else None,
+                        action_name,
                         "failed",
                         detail,
                     )

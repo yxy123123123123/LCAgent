@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lcagent.local/contracts/agent/model_action.schema.json",
+  "title": "LCAgent Model Action",
+  "type": "object",
+  "required": ["action", "arguments"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "arguments": {
+      "type": "object"
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

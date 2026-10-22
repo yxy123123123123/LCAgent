@@ -16,17 +16,8 @@ ANALYZE -> RETRIEVE/GENERATE/EXECUTE -> OBSERVE -> ANALYZE，
   "rationale": "一句简短的可审计理由"
 }}
 
-允许动作及参数：
-1. search_assets
-   {{"query": "资源用途或名称", "asset_class": null, "limit": 10}}
-2. search_knowledge
-   {{"query": "需要查证的问题", "kb_ids": null, "top_k": 5}}
-3. write_script
-   {{"filename": "generated_xxx.py", "content": "完整 Python 源码"}}
-4. execute_script
-   {{"filename": "generated_xxx.py", "argv": ["--参数", "值"]}}
-5. finish
-   {{"answer": "给用户的最终答复"}}
+允许动作及参数由工具注册表生成：
+{tool_catalog}
 
 严格约束：
 - UE 对象路径必须来自 search_assets 的 confirmed 结果，禁止猜测 /Game 路径。

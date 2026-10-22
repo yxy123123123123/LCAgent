@@ -124,6 +124,48 @@ class AgentStateMachineTests(unittest.TestCase):
         self.assertIn(AgentState.REPAIR.value, [item.state for item in result.trace])
         self.assertEqual("已修复", result.final_answer)
 
+    def test_registry_is_the_prompt_and_runtime_action_source(self):
+        gateway = FakeModelGateway(
+            [json.dumps({"action": "finish", "arguments": {"answer": "完成"}})]
+        )
+        agent = DecisionAgent(
+            self.temp_dir.name,
+            model_gateway=gateway,
+            retrieval_service=FakeRetrievalService(),
+            execution_runtime=FakeRuntime(),
+        )
+
+        agent.run_with_trace("检查工具注册表")
+        system_prompt = gateway.calls[0][0]["content"]
+
+        self.assertEqual(DecisionAgent.ALLOWED_ACTIONS, set(agent.tool_registry.names()))
+        for action_name in agent.tool_registry.names():
+            self.assertIn(action_name, system_prompt)
+
+    def test_invalid_tool_arguments_have_stable_repair_code(self):
+        agent = DecisionAgent(
+            self.temp_dir.name,
+            model_gateway=FakeModelGateway(
+                [
+                    json.dumps(
+                        {
+                            "action": "search_assets",
+                            "arguments": {"query": "材质", "unexpected": True},
+                        }
+                    ),
+                    json.dumps({"action": "finish", "arguments": {"answer": "已修复"}}),
+                ]
+            ),
+            retrieval_service=FakeRetrievalService(),
+            execution_runtime=FakeRuntime(),
+        )
+
+        result = agent.run_with_trace("检查参数错误")
+        repairs = [item for item in result.trace if item.state == AgentState.REPAIR.value]
+
+        self.assertEqual(1, len(repairs))
+        self.assertEqual("INVALID_TOOL_ARGUMENTS", repairs[0].detail["code"])
+
     def test_unretrieved_unreal_path_is_rejected_before_write(self):
         agent = DecisionAgent(
             self.temp_dir.name,
