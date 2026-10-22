@@ -27,8 +27,16 @@ if str(APP_DIR) not in sys.path:
 from asset_registry_client import scan_project_assets  # noqa: E402
 from context_compactor import ContextCompactor  # noqa: E402
 from embedding_gateway import EmbeddingGateway, EmbeddingProfileStore  # noqa: E402
-from knowledge_base import KnowledgeBaseError, KnowledgeBaseManager  # noqa: E402
+from goal_compiler import GoalCompiler, GoalCompilerError  # noqa: E402
+from goal_models import GoalSpecError  # noqa: E402
+from goal_store import GoalStore, GoalStoreError  # noqa: E402
+from knowledge_base import (  # noqa: E402
+    DEFAULT_DATA_ROOT,
+    KnowledgeBaseError,
+    KnowledgeBaseManager,
+)
 from model_gateway import ModelGateway, ModelProfileStore  # noqa: E402
+from observation_planner import ObservationPlanError, ObservationPlanner  # noqa: E402
 from resource_folder_report import build_folder_summaries  # noqa: E402
 from resource_registry import ResourceRegistry  # noqa: E402
 from run_manager import RunManager, RunManagerError  # noqa: E402
@@ -60,6 +68,7 @@ class LCAgentService:
         *,
         run_store: RunStore | None = None,
         run_manager: RunManager | None = None,
+        goal_data_root: Path | str | None = None,
     ) -> None:
         self.workspace_store = WorkspaceStore()
         self.chat_store = WorkspaceChatStore()
@@ -67,6 +76,7 @@ class LCAgentService:
         self.embedding_profile_store = EmbeddingProfileStore()
         self.run_store = run_store or (run_manager.run_store if run_manager else RunStore())
         self.run_manager = run_manager or RunManager(self.run_store)
+        self.goal_data_root = Path(goal_data_root or DEFAULT_DATA_ROOT)
 
     def _select_workspace(self, workspace_id: str):
         if not workspace_id.strip():
@@ -82,6 +92,10 @@ class LCAgentService:
             workspace_id,
             embedding_gateway=EmbeddingGateway(self.embedding_profile_store),
         )
+
+    def _goal_store(self, workspace_id: str) -> GoalStore:
+        self._select_workspace(workspace_id)
+        return GoalStore(workspace_id, data_root=self.goal_data_root)
 
     @staticmethod
     def _workspace_system_messages(workspace) -> list[dict[str, str]]:
@@ -101,7 +115,7 @@ class LCAgentService:
         }]
 
     def health(self) -> dict[str, Any]:
-        return {"ok": True, "service": "LCAgent", "version": "0.2.0"}
+        return {"ok": True, "service": "LCAgent", "version": "0.3.0"}
 
     def list_workspaces(self) -> dict[str, Any]:
         return {"workspaces": [asdict(item) for item in self.workspace_store.list()]}
@@ -315,6 +329,103 @@ class LCAgentService:
             raise ServiceError(str(exc), 404) from exc
         return {"run_id": run_id, "artifacts": artifacts}
 
+    def create_goal_draft(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """调用决策模型生成草案；结果必须由用户另行批准。"""
+
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        task_text = str(payload.get("task_text") or "").strip()
+        profile_id = str(payload.get("profile_id") or "").strip() or None
+        store = self._goal_store(workspace_id)
+        try:
+            result = GoalCompiler(ModelGateway(self.profile_store)).compile(
+                task_text,
+                profile_id=profile_id,
+            )
+            saved = store.save_draft(result.goal)
+        except (GoalCompilerError, GoalSpecError, GoalStoreError) as exc:
+            raise ServiceError(str(exc)) from exc
+        response = result.as_dict()
+        response["goal"] = saved.as_dict()
+        response["draft_hash"] = saved.approval["draft_hash"]
+        return response
+
+    def save_goal_draft(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """保存用户编辑后的结构化草案，不调用模型。"""
+
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        raw_goal = payload.get("goal")
+        if not isinstance(raw_goal, Mapping):
+            raise ServiceError("goal 必须是对象")
+        task_text = str(raw_goal.get("task_text") or payload.get("task_text") or "").strip()
+        goal_id = str(raw_goal.get("goal_id") or "").strip() or None
+        store = self._goal_store(workspace_id)
+        try:
+            goal = GoalCompiler.compile_document(task_text, raw_goal, goal_id=goal_id)
+            saved = store.save_draft(goal)
+        except (GoalCompilerError, GoalSpecError, GoalStoreError) as exc:
+            raise ServiceError(str(exc)) from exc
+        return {"goal": saved.as_dict(), "draft_hash": saved.approval["draft_hash"]}
+
+    def list_goals(self, workspace_id: str) -> dict[str, Any]:
+        try:
+            goals = self._goal_store(workspace_id).list()
+        except (GoalSpecError, GoalStoreError) as exc:
+            raise ServiceError(str(exc)) from exc
+        return {"workspace_id": workspace_id, "goals": [item.as_dict() for item in goals]}
+
+    def get_goal(self, goal_id: str, query: Mapping[str, Any]) -> dict[str, Any]:
+        workspace_id = str((query.get("workspace_id") or [""])[0]).strip()
+        try:
+            goal = self._goal_store(workspace_id).get(goal_id)
+        except GoalStoreError as exc:
+            raise ServiceError(str(exc), 404) from exc
+        except GoalSpecError as exc:
+            raise ServiceError(str(exc), 409) from exc
+        return {"goal": goal.as_dict()}
+
+    def approve_goal(self, goal_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        expected_hash = str(payload.get("expected_draft_hash") or "").strip()
+        approved_by = str(payload.get("approved_by") or "user").strip()
+        try:
+            goal = self._goal_store(workspace_id).approve(
+                goal_id,
+                approved_by=approved_by,
+                expected_draft_hash=expected_hash,
+            )
+        except (GoalStoreError, GoalSpecError) as exc:
+            raise ServiceError(str(exc), 409) from exc
+        return {"goal": goal.as_dict()}
+
+    def create_observation_plan(
+        self,
+        goal_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        store = self._goal_store(workspace_id)
+        try:
+            goal = store.get(goal_id)
+            plan = ObservationPlanner().compile(goal)
+            raw_fields = payload.get("supported_fields")
+            if raw_fields is not None:
+                if not isinstance(raw_fields, list):
+                    raise ServiceError("supported_fields 必须是数组")
+                ObservationPlanner.validate_capabilities(
+                    plan,
+                    supported_fields=[str(item) for item in raw_fields],
+                    supports_pagination=bool(payload.get("supports_pagination", False)),
+                )
+            store.save_observation_plan(plan)
+        except (GoalStoreError, GoalSpecError, ObservationPlanError) as exc:
+            status = (
+                409
+                if isinstance(exc, (GoalSpecError, ObservationPlanError))
+                else 400
+            )
+            raise ServiceError(str(exc), status) from exc
+        return {"observation_plan": plan.as_dict()}
+
     def ue_handshake(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         host = str(payload.get("host") or "127.0.0.1")
         port = int(payload.get("port") or 13377)
@@ -457,6 +568,22 @@ class LCAgentService:
             if len(parts) == 2 and parts[1] == "cancel" and method == "POST":
                 return self.cancel_run(run_id)
             raise ServiceError("接口不存在", 404)
+        if path.startswith("/api/goals/") and path not in {
+            "/api/goals/draft",
+            "/api/goals/save",
+        }:
+            suffix = path[len("/api/goals/") :].strip("/")
+            parts = suffix.split("/") if suffix else []
+            if not parts or not parts[0]:
+                raise ServiceError("goal_id 不能为空")
+            goal_id = parts[0]
+            if len(parts) == 1 and method == "GET":
+                return self.get_goal(goal_id, query)
+            if len(parts) == 2 and parts[1] == "approve" and method == "POST":
+                return self.approve_goal(goal_id, payload)
+            if len(parts) == 2 and parts[1] == "observation-plan" and method == "POST":
+                return self.create_observation_plan(goal_id, payload)
+            raise ServiceError("接口不存在", 404)
         if method == "GET" and path.startswith("/api/workspaces/") and path.endswith("/messages"):
             workspace_id = path[len("/api/workspaces/") : -len("/messages")].strip("/")
             if not workspace_id:
@@ -468,6 +595,9 @@ class LCAgentService:
         if method == "GET" and path.startswith("/api/workspaces/") and path.endswith("/knowledge"):
             workspace_id = path[len("/api/workspaces/") : -len("/knowledge")].strip("/")
             return self.knowledge_overview(workspace_id)
+        if method == "GET" and path.startswith("/api/workspaces/") and path.endswith("/goals"):
+            workspace_id = path[len("/api/workspaces/") : -len("/goals")].strip("/")
+            return self.list_goals(workspace_id)
         routes = {
             ("GET", "/api/health"): lambda: self.health(),
             ("GET", "/api/workspaces"): lambda: self.list_workspaces(),
@@ -483,6 +613,8 @@ class LCAgentService:
             ("POST", "/api/knowledge-bases/create"): lambda: self.create_knowledge_base(payload),
             ("POST", "/api/knowledge-bases/upload"): lambda: self.upload_knowledge_document(payload),
             ("POST", "/api/knowledge-bases/search"): lambda: self.search_knowledge(payload),
+            ("POST", "/api/goals/draft"): lambda: self.create_goal_draft(payload),
+            ("POST", "/api/goals/save"): lambda: self.save_goal_draft(payload),
             ("POST", "/api/runs"): lambda: self.create_run(payload),
             ("POST", "/api/tasks"): lambda: self.task(payload),
         }

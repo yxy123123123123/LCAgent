@@ -1,0 +1,19 @@
+{
+  "command": "query_scene_state",
+  "protocol_version": "2.0",
+  "supported_fields": [
+    "identity",
+    "class",
+    "asset_reference",
+    "transform",
+    "bounds",
+    "tags",
+    "components",
+    "hierarchy",
+    "properties"
+  ],
+  "supports_filtering": true,
+  "supports_field_projection": true,
+  "supports_pagination": true,
+  "max_page_size": 1000
+}

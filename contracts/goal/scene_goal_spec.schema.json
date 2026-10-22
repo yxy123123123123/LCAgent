@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lcagent.local/contracts/goal/scene_goal_spec.schema.json",
+  "title": "LCAgent SceneGoalSpec",
+  "type": "object",
+  "required": [
+    "goal_id",
+    "version",
+    "task_text",
+    "entities",
+    "required_constraints",
+    "optional_constraints",
+    "protected_entities",
+    "allowed_resources",
+    "tolerances",
+    "domain_extensions",
+    "approval"
+  ],
+  "properties": {
+    "goal_id": {"type": "string", "pattern": "^goal_[A-Za-z0-9_-]+$"},
+    "version": {"const": "1.0"},
+    "task_text": {"type": "string", "minLength": 1},
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/entity"}
+    },
+    "required_constraints": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/constraint"}
+    },
+    "optional_constraints": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/constraint"}
+    },
+    "protected_entities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "allowed_resources": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "tolerances": {
+      "type": "object",
+      "additionalProperties": {"type": "number", "minimum": 0}
+    },
+    "domain_extensions": {"type": "object"},
+    "approval": {"$ref": "#/$defs/approval"}
+  },
+  "$defs": {
+    "entity": {
+      "type": "object",
+      "required": ["entity_id", "label", "selector"],
+      "properties": {
+        "entity_id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"},
+        "label": {"type": "string", "minLength": 1},
+        "selector": {
+          "type": "object",
+          "minProperties": 1,
+          "properties": {
+            "actor_guid": {"type": "string", "minLength": 1},
+            "actor_name": {"type": "string", "minLength": 1},
+            "class_name": {"type": "string", "minLength": 1},
+            "asset_reference": {"type": "string", "minLength": 1},
+            "level_id": {"type": "string", "minLength": 1},
+            "tags": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "constraint": {
+      "type": "object",
+      "required": [
+        "constraint_id",
+        "type",
+        "subjects",
+        "parameters",
+        "required_observations"
+      ],
+      "properties": {
+        "constraint_id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"},
+        "type": {
+          "enum": [
+            "entity_exists",
+            "entity_count",
+            "entity_type",
+            "property_equals",
+            "property_contains",
+            "property_range",
+            "resource_reference_valid",
+            "geometric_relation",
+            "protected_unchanged"
+          ]
+        },
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "parameters": {"type": "object"},
+        "required_observations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "property_range"}}},
+          "then": {
+            "properties": {
+              "parameters": {
+                "type": "object",
+                "required": ["property"],
+                "properties": {
+                  "property": {"type": "string", "minLength": 1},
+                  "minimum": {"type": "number"},
+                  "maximum": {"type": "number"},
+                  "tolerance": {"type": "number", "minimum": 0}
+                },
+                "anyOf": [
+                  {"required": ["minimum"]},
+                  {"required": ["maximum"]}
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {"enum": ["property_equals", "property_contains"]}
+            }
+          },
+          "then": {
+            "properties": {
+              "parameters": {
+                "type": "object",
+                "required": ["property", "value"],
+                "properties": {
+                  "property": {"type": "string", "minLength": 1},
+                  "value": {}
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "approval": {
+      "type": "object",
+      "required": ["status", "draft_hash", "approved_at", "approved_by", "frozen_hash"],
+      "properties": {
+        "status": {"enum": ["draft", "approved"]},
+        "draft_hash": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "approved_at": {"type": ["string", "null"], "format": "date-time"},
+        "approved_by": {"type": ["string", "null"]},
+        "frozen_hash": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "approved"}}},
+          "then": {
+            "properties": {
+              "draft_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+              "approved_at": {"type": "string", "minLength": 1},
+              "approved_by": {"type": "string", "minLength": 1},
+              "frozen_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,31 @@
+{
+  "entities": [
+    {
+      "entity_id": "target_actor",
+      "label": "Actor X 坐标闭环测试对象",
+      "selector": {
+        "actor_name": "LCA_ValidationActor"
+      }
+    }
+  ],
+  "required_constraints": [
+    {
+      "constraint_id": "actor_x_in_range",
+      "type": "property_range",
+      "subjects": ["target_actor"],
+      "parameters": {
+        "property": "transform.location.x",
+        "minimum": 100.0,
+        "maximum": 100.0,
+        "tolerance": 0.1
+      }
+    }
+  ],
+  "optional_constraints": [],
+  "protected_entities": [],
+  "allowed_resources": [],
+  "tolerances": {
+    "position_cm": 0.1
+  },
+  "domain_extensions": {}
+}

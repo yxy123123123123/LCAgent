@@ -1,4 +1,5 @@
 import base64
+import json
 import sys
 import tempfile
 import unittest
@@ -249,6 +250,92 @@ class ServiceRunTests(unittest.TestCase):
 
         self.assertTrue(response["run_id"].startswith("run_"))
         self.assertEqual("运行完成", response["result"]["final_answer"])
+
+
+class ServiceGoalTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.project = self.root / "LandscapeTool"
+        self.project.mkdir()
+        self.run_store = RunStore(self.root / "lca.db", artifacts_root=self.root / "runs")
+        self.run_manager = RunManager(self.run_store, agent_factory=_ServiceRunAgent)
+        self.service = LCAgentService(
+            run_store=self.run_store,
+            run_manager=self.run_manager,
+            goal_data_root=self.root / "workspace_data",
+        )
+        self.service.workspace_store = WorkspaceStore(self.root / "workspaces.json")
+        self.workspace = self.service.workspace_store.add(str(self.project))
+        self.goal_document = json.loads(
+            (REPO_ROOT / "contracts" / "examples" / "actor_x_goal_draft.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def tearDown(self):
+        self.run_manager.shutdown()
+        self.temp_dir.cleanup()
+
+    def _save_draft(self):
+        return self.service.dispatch(
+            "POST",
+            {
+                "_path": "/api/goals/save",
+                "workspace_id": self.workspace.workspace_id,
+                "task_text": "把测试 Actor 的 X 坐标设置为 100 厘米",
+                "goal": self.goal_document,
+            },
+        )
+
+    def test_goal_can_be_saved_approved_and_compiled_to_plan(self):
+        saved = self._save_draft()
+        goal_id = saved["goal"]["goal_id"]
+        approved = self.service.dispatch(
+            "POST",
+            {
+                "_path": f"/api/goals/{goal_id}/approve",
+                "workspace_id": self.workspace.workspace_id,
+                "expected_draft_hash": saved["draft_hash"],
+                "approved_by": "tester",
+            },
+        )
+        planned = self.service.dispatch(
+            "POST",
+            {
+                "_path": f"/api/goals/{goal_id}/observation-plan",
+                "workspace_id": self.workspace.workspace_id,
+                "supported_fields": ["identity", "transform"],
+                "supports_pagination": True,
+            },
+        )
+        listed = self.service.dispatch(
+            "GET",
+            {
+                "_path": f"/api/workspaces/{self.workspace.workspace_id}/goals",
+            },
+        )
+
+        self.assertEqual("approved", approved["goal"]["approval"]["status"])
+        self.assertEqual(
+            ["identity", "transform"],
+            planned["observation_plan"]["queries"][0]["fields"],
+        )
+        self.assertEqual(1, len(listed["goals"]))
+
+    def test_unapproved_goal_cannot_create_execution_plan(self):
+        saved = self._save_draft()
+        goal_id = saved["goal"]["goal_id"]
+
+        with self.assertRaises(ServiceError) as raised:
+            self.service.dispatch(
+                "POST",
+                {
+                    "_path": f"/api/goals/{goal_id}/observation-plan",
+                    "workspace_id": self.workspace.workspace_id,
+                },
+            )
+        self.assertEqual(409, raised.exception.status)
 
 
 if __name__ == "__main__":

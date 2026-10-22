@@ -17,7 +17,7 @@ flowchart LR
 ## 当前功能状态
 
 - Electron 客户端：添加/移除工作区、模型选择、工作区对话、手动压缩上下文、删除对话、UE 资源读取、知识库建库/上传/检索。
-- Python 服务：模型网关、上下文压缩、知识库、资源注册表、状态机任务、持久化运行记录和 UE 协议适配。
+- Python 服务：模型网关、上下文压缩、知识库、资源注册表、可审核目标规范、确定性观测计划、持久化运行记录和 UE 协议适配。
 - Streamlit 管理控制台：新增或编辑模型与 Embedding、资源文件夹语义报告审核、智能体任务和诊断。
 - UE 编辑器内不需要额外制作 LCAgent 面板；UE 只需启用并运行 UnrealMCP 插件。
 
@@ -200,6 +200,7 @@ npx --yes pnpm@11.19.0 build
 - 模型档案保存在 `LCA/model_profiles.local.json`；
 - Embedding 档案保存在 `LCA/embedding_profiles.local.json`；
 - 工作区知识库和注册表保存在 `.lca_data/workspaces/`；
+- 场景目标草案、冻结目标和观测计划保存在 `.lca_data/workspaces/<workspace_id>/goals/`；
 - 任务运行、连续事件和产物索引保存在 `.lca_data/lca.db`；
 - 每次任务的完整轨迹产物保存在 `.lca_data/runs/<run_id>/artifacts/`；
 - 本地对话记录保存在 `.codex_tmp/workspace_chats.json`；
