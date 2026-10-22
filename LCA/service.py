@@ -17,14 +17,13 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from Agent import DecisionAgent  # noqa: E402
 from asset_registry_client import scan_project_assets  # noqa: E402
 from context_compactor import ContextCompactor  # noqa: E402
 from embedding_gateway import EmbeddingGateway, EmbeddingProfileStore  # noqa: E402
@@ -32,6 +31,8 @@ from knowledge_base import KnowledgeBaseError, KnowledgeBaseManager  # noqa: E40
 from model_gateway import ModelGateway, ModelProfileStore  # noqa: E402
 from resource_folder_report import build_folder_summaries  # noqa: E402
 from resource_registry import ResourceRegistry  # noqa: E402
+from run_manager import RunManager, RunManagerError  # noqa: E402
+from run_store import RunStore, RunStoreError  # noqa: E402
 from ue_protocol import UEProtocolClient  # noqa: E402
 from workspace_store import (  # noqa: E402
     WorkspaceChatStore,
@@ -54,11 +55,18 @@ class ServiceError(RuntimeError):
 
 
 class LCAgentService:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        run_store: RunStore | None = None,
+        run_manager: RunManager | None = None,
+    ) -> None:
         self.workspace_store = WorkspaceStore()
         self.chat_store = WorkspaceChatStore()
         self.profile_store = ModelProfileStore()
         self.embedding_profile_store = EmbeddingProfileStore()
+        self.run_store = run_store or (run_manager.run_store if run_manager else RunStore())
+        self.run_manager = run_manager or RunManager(self.run_store)
 
     def _select_workspace(self, workspace_id: str):
         if not workspace_id.strip():
@@ -93,7 +101,7 @@ class LCAgentService:
         }]
 
     def health(self) -> dict[str, Any]:
-        return {"ok": True, "service": "LCAgent", "version": "0.1.0"}
+        return {"ok": True, "service": "LCAgent", "version": "0.2.0"}
 
     def list_workspaces(self) -> dict[str, Any]:
         return {"workspaces": [asdict(item) for item in self.workspace_store.list()]}
@@ -224,23 +232,88 @@ class LCAgentService:
             "compression_error": prepared.compression_error,
         }
 
-    def task(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _submit_run(self, payload: Mapping[str, Any]):
         workspace_id = str(payload.get("workspace_id") or "").strip()
         profile_id = str(payload.get("profile_id") or "").strip() or None
         task_text = str(payload.get("task") or "").strip()
         if not workspace_id or not task_text:
             raise ServiceError("workspace_id 和 task 不能为空")
         workspace = self._select_workspace(workspace_id)
+        raw_budgets = payload.get("budgets")
+        if raw_budgets is not None and not isinstance(raw_budgets, Mapping):
+            raise ServiceError("budgets 必须是对象")
+        try:
+            return self.run_manager.submit(
+                workspace_id=workspace.workspace_id,
+                workspace_path=workspace.path,
+                task_text=task_text,
+                model_profile_id=profile_id,
+                embedding_profile_id=(
+                    str(payload.get("embedding_profile_id") or "").strip() or None
+                ),
+                dry_run=bool(payload.get("dry_run", True)),
+                budgets=raw_budgets,
+            )
+        except (RunManagerError, ValueError) as exc:
+            raise ServiceError(str(exc)) from exc
 
-        agent = DecisionAgent(
-            project_directory=workspace.path,
-            workspace_id=workspace.workspace_id,
-            model_profile_id=profile_id,
-            embedding_profile_id=payload.get("embedding_profile_id"),
-            dry_run=bool(payload.get("dry_run", True)),
-        )
-        result = agent.run_with_trace(task_text)
-        return {"result": result.as_dict()}
+    def create_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """异步创建运行；调用方使用 run_id 查询进度和结果。"""
+
+        return {"run": self._submit_run(payload).as_dict()}
+
+    def task(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """旧同步接口的兼容包装；新客户端应优先使用 /api/runs。"""
+
+        run = self._submit_run(payload)
+        try:
+            result = self.run_manager.wait(run.run_id)
+        except RunManagerError as exc:
+            raise ServiceError(str(exc), 500) from exc
+        return {"run_id": run.run_id, "result": result}
+
+    def list_runs(self, query: Mapping[str, Any]) -> dict[str, Any]:
+        workspace_id = str((query.get("workspace_id") or [""])[0]).strip() or None
+        try:
+            limit = int((query.get("limit") or [100])[0])
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("limit 必须是整数") from exc
+        return {
+            "runs": [
+                item.as_dict()
+                for item in self.run_store.list_runs(workspace_id, limit=limit)
+            ]
+        }
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        try:
+            return {"run": self.run_store.get_run(run_id).as_dict()}
+        except RunStoreError as exc:
+            raise ServiceError(str(exc), 404) from exc
+
+    def get_run_events(self, run_id: str, query: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            after_sequence = int((query.get("after_sequence") or [0])[0])
+            events = self.run_store.list_events(run_id, after_sequence=after_sequence)
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("after_sequence 必须是整数") from exc
+        except RunStoreError as exc:
+            raise ServiceError(str(exc), 404) from exc
+        return {"run_id": run_id, "events": [item.as_dict() for item in events]}
+
+    def cancel_run(self, run_id: str) -> dict[str, Any]:
+        try:
+            run = self.run_manager.cancel(run_id)
+        except RunManagerError as exc:
+            raise ServiceError(str(exc), 404) from exc
+        return {"run": run.as_dict()}
+
+    def get_run_artifacts(self, run_id: str) -> dict[str, Any]:
+        try:
+            artifacts = self.run_store.list_artifacts(run_id)
+        except RunStoreError as exc:
+            raise ServiceError(str(exc), 404) from exc
+        return {"run_id": run_id, "artifacts": artifacts}
 
     def ue_handshake(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         host = str(payload.get("host") or "127.0.0.1")
@@ -366,6 +439,24 @@ class LCAgentService:
 
     def dispatch(self, method: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         path = urlparse(str(payload.get("_path") or "")).path
+        query = payload.get("_query") if isinstance(payload.get("_query"), Mapping) else {}
+        if path == "/api/runs" and method == "GET":
+            return self.list_runs(query)
+        if path.startswith("/api/runs/"):
+            suffix = path[len("/api/runs/") :].strip("/")
+            parts = suffix.split("/") if suffix else []
+            if not parts or not parts[0]:
+                raise ServiceError("run_id 不能为空")
+            run_id = parts[0]
+            if len(parts) == 1 and method == "GET":
+                return self.get_run(run_id)
+            if len(parts) == 2 and parts[1] == "events" and method == "GET":
+                return self.get_run_events(run_id, query)
+            if len(parts) == 2 and parts[1] == "artifacts" and method == "GET":
+                return self.get_run_artifacts(run_id)
+            if len(parts) == 2 and parts[1] == "cancel" and method == "POST":
+                return self.cancel_run(run_id)
+            raise ServiceError("接口不存在", 404)
         if method == "GET" and path.startswith("/api/workspaces/") and path.endswith("/messages"):
             workspace_id = path[len("/api/workspaces/") : -len("/messages")].strip("/")
             if not workspace_id:
@@ -392,6 +483,7 @@ class LCAgentService:
             ("POST", "/api/knowledge-bases/create"): lambda: self.create_knowledge_base(payload),
             ("POST", "/api/knowledge-bases/upload"): lambda: self.upload_knowledge_document(payload),
             ("POST", "/api/knowledge-bases/search"): lambda: self.search_knowledge(payload),
+            ("POST", "/api/runs"): lambda: self.create_run(payload),
             ("POST", "/api/tasks"): lambda: self.task(payload),
         }
         handler = routes.get((method, path))
@@ -429,9 +521,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def _handle(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         payload = self._read_json() if self.command == "POST" else {}
         payload["_path"] = path
+        payload["_query"] = parse_qs(parsed.query, keep_blank_values=False)
         try:
             result = self.service.dispatch(self.command, payload)
             self._send_json({"ok": True, "data": result})
@@ -466,6 +560,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         server.server_close()
+        # 本地服务退出时释放后台线程池；正在运行的任务会在当前安全边界结束。
+        RequestHandler.service.run_manager.shutdown(wait=False)
     return 0
 
 

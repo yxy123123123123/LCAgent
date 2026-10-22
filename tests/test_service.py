@@ -12,6 +12,9 @@ LCA_DIR = REPO_ROOT / "LCA"
 if str(LCA_DIR) not in sys.path:
     sys.path.insert(0, str(LCA_DIR))
 
+from Agent import TraceStep  # noqa: E402
+from run_manager import RunManager  # noqa: E402
+from run_store import RunStore  # noqa: E402
 from service import LCAgentService, ServiceError  # noqa: E402
 from ue_protocol import UECapabilities  # noqa: E402
 from workspace_store import WorkspaceChatStore, WorkspaceStore  # noqa: E402
@@ -160,6 +163,92 @@ class ServiceFeatureTests(unittest.TestCase):
 
         self.assertEqual("doc-test", result["document"]["document_id"])
         self.assertEqual(content, manager.ingest_bytes.call_args.args[2])
+
+
+class _ServiceRunResult:
+    final_answer = "运行完成"
+    model_steps = 1
+    dry_run = True
+
+    def as_dict(self):
+        return {
+            "final_answer": self.final_answer,
+            "trace": [],
+            "model_steps": self.model_steps,
+            "dry_run": self.dry_run,
+        }
+
+
+class _ServiceRunAgent:
+    def __init__(self, **kwargs):
+        self.trace_callback = kwargs["trace_callback"]
+
+    def run_with_trace(self, _task_text):
+        self.trace_callback(TraceStep(1, "ANALYZE", None, "running", {}))
+        self.trace_callback(TraceStep(2, "FINISH", "finish", "success", {}))
+        return _ServiceRunResult()
+
+
+class ServiceRunTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.project = self.root / "LandscapeTool"
+        self.project.mkdir()
+        self.run_store = RunStore(self.root / "lca.db", artifacts_root=self.root / "runs")
+        self.run_manager = RunManager(self.run_store, agent_factory=_ServiceRunAgent)
+        self.service = LCAgentService(
+            run_store=self.run_store,
+            run_manager=self.run_manager,
+        )
+        self.service.workspace_store = WorkspaceStore(self.root / "workspaces.json")
+        self.workspace = self.service.workspace_store.add(str(self.project))
+
+    def tearDown(self):
+        self.run_manager.shutdown()
+        self.temp_dir.cleanup()
+
+    def test_async_run_routes_expose_status_events_and_artifacts(self):
+        created = self.service.dispatch(
+            "POST",
+            {
+                "_path": "/api/runs",
+                "workspace_id": self.workspace.workspace_id,
+                "task": "离线测试",
+                "dry_run": True,
+            },
+        )
+        run_id = created["run"]["run_id"]
+        self.run_manager.wait(run_id, timeout=5)
+
+        run = self.service.dispatch("GET", {"_path": f"/api/runs/{run_id}"})["run"]
+        events = self.service.dispatch(
+            "GET",
+            {
+                "_path": f"/api/runs/{run_id}/events",
+                "_query": {"after_sequence": ["1"]},
+            },
+        )["events"]
+        artifacts = self.service.dispatch(
+            "GET", {"_path": f"/api/runs/{run_id}/artifacts"}
+        )["artifacts"]
+
+        self.assertEqual("succeeded", run["status"])
+        self.assertTrue(all(item["sequence"] > 1 for item in events))
+        self.assertEqual("agent_result.json", artifacts[0]["artifact_id"])
+
+    def test_legacy_task_route_waits_for_new_run(self):
+        response = self.service.dispatch(
+            "POST",
+            {
+                "_path": "/api/tasks",
+                "workspace_id": self.workspace.workspace_id,
+                "task": "兼容测试",
+            },
+        )
+
+        self.assertTrue(response["run_id"].startswith("run_"))
+        self.assertEqual("运行完成", response["result"]["final_answer"])
 
 
 if __name__ == "__main__":

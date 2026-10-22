@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lcagent.local/contracts/run/task_run.schema.json",
+  "title": "LCAgent Task Run",
+  "type": "object",
+  "required": [
+    "run_id",
+    "workspace_id",
+    "task_text",
+    "execution_mode",
+    "status",
+    "created_at",
+    "budgets",
+    "metrics",
+    "cancel_requested"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "pattern": "^run_"},
+    "workspace_id": {"type": "string", "minLength": 1},
+    "task_text": {"type": "string", "minLength": 1},
+    "model_profile_id": {"type": ["string", "null"]},
+    "embedding_profile_id": {"type": ["string", "null"]},
+    "execution_mode": {"enum": ["dry_run", "live"]},
+    "status": {
+      "enum": [
+        "queued",
+        "running",
+        "cancelling",
+        "validating",
+        "repairing",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "started_at": {"type": ["string", "null"], "format": "date-time"},
+    "finished_at": {"type": ["string", "null"], "format": "date-time"},
+    "termination_reason": {"type": ["string", "null"]},
+    "final_answer": {"type": ["string", "null"]},
+    "error": {"type": ["object", "null"]},
+    "budgets": {"type": "object"},
+    "metrics": {"type": "object"},
+    "cancel_requested": {"type": "boolean"}
+  },
+  "additionalProperties": false
+}

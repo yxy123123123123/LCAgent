@@ -11,7 +11,7 @@ from types import SimpleNamespace
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "LCA"))
 
-from Agent import AgentState, DecisionAgent  # noqa: E402
+from Agent import AgentCancelledError, AgentState, DecisionAgent  # noqa: E402
 from model_gateway import ModelReply  # noqa: E402
 
 
@@ -165,6 +165,22 @@ class AgentStateMachineTests(unittest.TestCase):
 
         self.assertEqual(1, len(repairs))
         self.assertEqual("INVALID_TOOL_ARGUMENTS", repairs[0].detail["code"])
+
+    def test_cancelled_agent_does_not_call_model(self):
+        gateway = FakeModelGateway(
+            [json.dumps({"action": "finish", "arguments": {"answer": "不应执行"}})]
+        )
+        agent = DecisionAgent(
+            self.temp_dir.name,
+            model_gateway=gateway,
+            retrieval_service=FakeRetrievalService(),
+            execution_runtime=FakeRuntime(),
+            should_cancel=lambda: True,
+        )
+
+        with self.assertRaises(AgentCancelledError):
+            agent.run_with_trace("取消测试")
+        self.assertEqual([], gateway.calls)
 
     def test_unretrieved_unreal_path_is_rejected_before_write(self):
         agent = DecisionAgent(

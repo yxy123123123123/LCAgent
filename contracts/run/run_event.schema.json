@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lcagent.local/contracts/run/run_event.schema.json",
+  "title": "LCAgent Run Event",
+  "type": "object",
+  "required": [
+    "run_id",
+    "sequence",
+    "event_type",
+    "phase",
+    "status",
+    "timestamp",
+    "summary",
+    "artifact_refs"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "pattern": "^run_"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "event_type": {"type": "string", "minLength": 1},
+    "phase": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "summary": {"type": "object"},
+    "artifact_refs": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "additionalProperties": false
+}

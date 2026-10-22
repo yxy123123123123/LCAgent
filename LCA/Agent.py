@@ -12,7 +12,7 @@ import re
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import click
 
@@ -39,6 +39,12 @@ class AgentState(str, Enum):
 
 class StateMachineError(RuntimeError):
     """状态机动作、格式或步数错误。"""
+
+
+class AgentCancelledError(StateMachineError):
+    """用户请求取消；当前边界之后不得再发起模型或工具动作。"""
+
+    code = "RUN_CANCELLED"
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,8 @@ class DecisionAgent:
         execution_runtime: ExecutionRuntime | None = None,
         action_protocol: ActionProtocol | None = None,
         tool_registry: ToolRegistry | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+        trace_callback: Callable[[TraceStep], None] | None = None,
         max_model_steps: int = 12,
         max_repairs: int = 3,
         dry_run: bool = True,
@@ -114,6 +122,8 @@ class DecisionAgent:
         self.retrieval_service = retrieval_service
         self.execution_runtime = execution_runtime or ExecutionRuntime()
         self.action_protocol = action_protocol or ActionProtocol()
+        self.should_cancel = should_cancel or (lambda: False)
+        self.trace_callback = trace_callback
         self.max_model_steps = max_model_steps
         self.max_repairs = max_repairs
         self.dry_run = dry_run
@@ -374,10 +384,15 @@ class DecisionAgent:
                 + ", ".join(unauthorized)
             )
 
-    @staticmethod
-    def _renumber(trace: list[TraceStep], items: Sequence[TraceStep]) -> None:
+    def _append_trace(self, trace: list[TraceStep], item: TraceStep) -> None:
+        trace.append(item)
+        if self.trace_callback is not None:
+            self.trace_callback(item)
+
+    def _renumber(self, trace: list[TraceStep], items: Sequence[TraceStep]) -> None:
         for item in items:
-            trace.append(
+            self._append_trace(
+                trace,
                 TraceStep(
                     sequence=len(trace) + 1,
                     state=item.state,
@@ -386,6 +401,10 @@ class DecisionAgent:
                     detail=item.detail,
                 )
             )
+
+    def _raise_if_cancelled(self) -> None:
+        if self.should_cancel():
+            raise AgentCancelledError("运行已取消，不再发起新的模型或工具动作")
 
     def run_with_trace(self, user_input: str) -> AgentRunResult:
         task = user_input.strip()
@@ -405,7 +424,9 @@ class DecisionAgent:
         self._authorized_asset_paths.clear()
 
         for model_step in range(1, self.max_model_steps + 1):
-            trace.append(
+            self._raise_if_cancelled()
+            self._append_trace(
+                trace,
                 TraceStep(
                     len(trace) + 1,
                     AgentState.ANALYZE.value,
@@ -415,6 +436,8 @@ class DecisionAgent:
                 )
             )
             reply = self.model_gateway.chat(messages, profile_id=self.model_profile_id)
+            # 模型调用本身不能安全强制终止；返回后先检查取消，再决定是否执行动作。
+            self._raise_if_cancelled()
             messages.append({"role": "assistant", "content": reply.content})
             action_name: str | None = None
             try:
@@ -426,8 +449,10 @@ class DecisionAgent:
                     allowed_effects=self._allowed_tool_effects,
                 )
                 if registered.spec.terminal:
+                    self._raise_if_cancelled()
                     answer = self._text_argument(action.arguments, "answer")
-                    trace.append(
+                    self._append_trace(
+                        trace,
                         TraceStep(
                             len(trace) + 1,
                             AgentState.FINISH.value,
@@ -438,6 +463,7 @@ class DecisionAgent:
                     )
                     return AgentRunResult(answer, trace, model_step, self.dry_run)
 
+                self._raise_if_cancelled()
                 substeps, observation = self._dispatch(action_name, action.arguments)
                 self._renumber(trace, substeps)
                 # 工具返回只作为用户可见 observation 输入，不混入系统指令。
@@ -448,6 +474,8 @@ class DecisionAgent:
                         + json.dumps(observation, ensure_ascii=False),
                     }
                 )
+            except AgentCancelledError:
+                raise
             except Exception as exc:
                 repairs += 1
                 detail = {"error_type": type(exc).__name__, "message": str(exc)}
@@ -457,7 +485,8 @@ class DecisionAgent:
                 error_details = getattr(exc, "details", None)
                 if error_details:
                     detail["details"] = error_details
-                trace.append(
+                self._append_trace(
+                    trace,
                     TraceStep(
                         len(trace) + 1,
                         AgentState.REPAIR.value,
