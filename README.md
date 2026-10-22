@@ -1,459 +1,212 @@
 # LCAgent
 
-**AI 驱动的 Unreal Engine 场景生成助手** — 使用大语言模型（DeepSeek）解释自然语言指令，自动在虚幻引擎中创建地形、道路、材质等军事仿真场景。
+LCAgent 是一个面向 Unreal Engine 场景构建的本地智能体系统。当前主界面采用 **Electron + Vue 3**，本地 **Python 服务**负责模型调用、工作区数据、知识检索和任务编排，并通过 UE 工程中的 **UnrealMCP** 插件与编辑器通信。
 
-## 架构概览
+当前 UE 通信协议保持不变：Python 侧连接 `127.0.0.1:13377`，UnrealMCP 再调用地形、道路、河流等 UE 插件能力。
 
-```
-用户输入（自然语言）
-       │
-       ▼
-┌──────────────────────────────────┐
-│       DecisionAgent（决策者）      │
-│   任务分解 · 编排调度 · 执行命令     │
-└──────────┬──────────┬────────────┘
-           │          │
-    ┌──────▼──┐  ┌───▼───────────┐
-    │ Retrieval│  │ CodingAgent   │
-    │  Agent   │  │  （编码者）     │
-    │（检索者） │  │  生成Python脚本 │
-    └────┬─────┘  └───┬───────────┘
-         │              │
-    ┌────▼────┐    ┌───▼────────┐
-    │ Chroma  │    │ 写入磁盘     │
-    │ 向量库   │    │ .py 脚本    │
-    └─────────┘    └───┬────────┘
-                       │
-                  ┌────▼──────────┐
-                  │ subprocess.run│
-                  │  执行脚本      │
-                  └────┬──────────┘
-                       │
-                  ┌────▼──────────┐
-                  │ Unreal Engine │
-                  │ TCP :13377    │
-                  │ (MCP 协议)    │
-                  └───────────────┘
+```mermaid
+flowchart LR
+    UI[Electron + Vue 3] -->|IPC| Main[Electron 主进程]
+    Main -->|HTTP 127.0.0.1:8765| Service[Python 本地服务]
+    Service --> Model[决策/对话模型]
+    Service --> KB[Embedding 与知识库]
+    Service -->|TCP 127.0.0.1:13377| MCP[UE UnrealMCP]
+    MCP --> Tools[地形/道路/河流等插件]
 ```
 
-### 两种运行模式
+## 当前功能状态
 
-| 模式 | 入口文件 | 说明 |
-|---|---|---|
-| **多智能体**（推荐） | `Agent.py` | DecisionAgent 编排 RetrievalAgent + CodingAgent，适合复杂任务 |
-| **单智能体** | `oneAgent.py` | 单一 ReAct Agent，自带 read/write/terminal 工具，适合简单任务和教学调试 |
+- Electron 客户端：添加/移除工作区、模型选择、工作区对话、手动压缩上下文、删除对话、UE 资源读取、知识库建库/上传/检索。
+- Python 服务：模型网关、上下文压缩、知识库、资源注册表、状态机任务和 UE 协议适配。
+- Streamlit 管理控制台：新增或编辑模型与 Embedding、资源文件夹语义报告审核、智能体任务和诊断。
+- UE 编辑器内不需要额外制作 LCAgent 面板；UE 只需启用并运行 UnrealMCP 插件。
 
-## 环境要求
+> Electron 中的“任务”和“设置”仍在迁移。UE 资源页当前完成权威路径扫描与本地登记；需要模型生成文件夹用途报告并由用户审核时，仍使用 Streamlit 管理控制台。
 
-- **Windows** 操作系统
-- **Python** ≥ 3.10（已经附带在项目的虚拟环境中）
-- **Unreal Engine** — 需运行 MCP 服务端（监听 `localhost:13377`）
-- 以下 API 服务的有效密钥：
-  - [DeepSeek](https://platform.deepseek.com/)（LLM 推理）
-  - [阿里云 DashScope](https://dashscope.aliyun.com/)（文本嵌入，1024维）
+## 1. 运行环境
 
----
+当前版本面向 Windows，建议准备：
 
-## 使用说明（Windows CMD）
+- Windows 10/11；
+- Python 3.11～3.13（当前开发环境已在 Python 3.13.9 验证）；
+- Node.js 22 或更高版本（当前开发环境为 Node.js 24.11.1）；
+- Unreal Engine 5；
+- Visual Studio 2022，并安装“使用 C++ 的游戏开发”以及对应 Windows SDK；
+- Git（推荐使用 SSH，也可使用 HTTPS）。
 
-以下所有操作在 **Windows 命令提示符（CMD）** 中进行。
+检查基础环境：
 
----
-
-### 第一步：打开 CMD，进入项目根目录
-
-按 `Win + R`，输入 `cmd`，回车打开命令提示符，然后执行：
-
-```cmd
-cd /d E:\LCAgent
+```powershell
+python --version
+node --version
+git --version
 ```
 
-此时你在项目根目录，应能看到 `LCA`、`RAG` 文件夹和 `README.md` 等文件。可以用 `dir` 确认：
+## 2. 下载源码
 
-```cmd
-dir
+使用 Git：
+
+```powershell
+git clone https://github.com/yxy123123123123/LCAgent.git
+cd .\LCAgent
 ```
 
-预期输出类似：
+已经配置 GitHub SSH 的用户也可以使用：
 
-```
-2026/07/01  10:30    <DIR>          LCA
-2026/07/01  10:30    <DIR>          RAG
-2026/07/01  10:30    <DIR>          langchain_env
-2026/07/01  10:30             3,456 README.md
-2026/07/01  10:30               256 requirements.txt
-2026/07/01  10:30               152 .gitignore
+```powershell
+git clone ssh://git@ssh.github.com:443/yxy123123123123/LCAgent.git
+cd .\LCAgent
 ```
 
----
+也可以从 GitHub 下载 ZIP，解压后在 PowerShell 中进入解压目录。下文以 `E:\LCAgent` 为示例，实际使用时请替换为自己的路径。
 
-### 第二步：激活虚拟环境
+## 3. 安装 Python 依赖
 
-项目已自带 Python 虚拟环境，无需额外安装 Python。直接激活：
-
-```cmd
-langchain_env\Scripts\activate
-```
-
-激活成功后，CMD 提示符前会出现 `(langchain_env)` 标识：
-
-```
-(langchain_env) E:\LCAgent>
-```
-
-> **如果激活失败**，请确保 CMD 当前在 `E:\LCAgent` 目录下。
-
----
-
-### 第三步：配置 API 密钥
-
-用记事本编辑 `.env` 文件：
-
-```cmd
-notepad LCA\.env
-```
-
-将文件中的占位符替换为你的真实密钥：
-
-```env
-DEEPSEEK_API_KEY=sk-你的deepseek密钥
-DASHSCOPE_API_KEY=sk-你的dashscope密钥
-```
-
-保存并关闭。
-
----
-
-### 第四步：构建知识库（首次使用或资源变更后执行）
-
-进入 LCA 目录：
-
-```cmd
-cd LCA
-```
-
-构建资源路径向量库：
-
-```cmd
-python RAG_path.py
-```
-
-预期输出：
-
-```
-🔍 开始构建向量库...
-✅ 构建完成！有效路径分片数：5
-
-============================================================
-📋 向量库完整内容列表
-============================================================
-
-【条目 1】
-ID：0
-路径内容：山地地形：E:/UE_project/DEM/CS_01.tif
-------------------------------------------------------------
-
-【条目 2】
-ID：1
-路径内容：盆地地形：E:/UE_project/DEM/CS_02.tif
-------------------------------------------------------------
-
-...（更多条目）...
-
-📊 向量库总条目数：5
-```
-
-构建对话记忆向量库：
-
-```cmd
-python RAG_memory.py
-```
-
-预期输出：
-
-```
-🔍 开始构建memory_db向量库（保留旧数据）...
-✅ 构建完成！新增文档块：3，累计文档块：3
-```
-
-> 每次修改 `RAG\资源库.txt` 后，需重新执行 `python RAG_path.py` 刷新向量库。
-
----
-
-### 第五步：启动智能助手
-
-```cmd
-python Agent.py
-```
-
-（可选：指定项目目录）
-
-```cmd
-python Agent.py E:\LCAgent\LCA
-```
-
-启动后进入交互式 REPL：
-
-```
-欢迎使用环境搭建助手！
-📌 规则说明：
-  - 仅当输入包含「检索记忆/查看历史/记忆库」时，才会检索记忆库内容
-  - 所有交互都会自动记录到记忆库
-
-👤 你: _
-```
-
----
-
-### 第六步：输入任务
-
-在 `👤 你:` 提示符后输入你想要执行的任务，例如：
-
-```
-👤 你: 帮我创建一个山地地形，材质使用M4材质
-```
-
-Agent 会逐步骤显示思考过程：
-
-```
-🤔 DecisionAgent 思考中...
-
-💭 决策智能体-Thought: 这个任务需要先通过检索智能体获取山地地形的高程数据文件路径和M4材质路径
-，然后通过编码智能体编写Python脚本来创建地形。
-
-📞 决策智能体：调用检索智能体，查询：山地地形
-
-🤔 RetrievalAgent 思考中...
-
-💭 检索智能体-Thought: 用户需要查询山地地形相关资源路径
-
-🔧 检索智能体-Action: retrieve_path_tool(山地地形)
-
-📚 检索智能体：正在从路径库检索...
-
-✅ 检索智能体-路径库结果：
-【结果1】
-山地地形：E:/UE_project/DEM/CS_01.tif
-
-🔍 决策智能体-检索智能体返回：路径检索：...
-
-📞 决策智能体：调用编码智能体，查询：创建地形
-
-🤔 CodingAgent 思考中...
-📝 编码智能体：文件写入成功 -> E:\LCAgent\LCA\create_terrain.py
-
-🔧 决策智能体-Action: run_terminal_command(python create_terrain.py --file-paths "E:/UE_project/DEM/CS_01.tif" --material-path "/Game/M4UE5Master1_Inst.M4UE5Master1_Inst")
-
-🔍 Observation：山地地形已经在当前关卡中创建成功
-
-🤖 助手: 完成在当前关卡中创建一个山地类型的地形。
---------------------------------------------------------------------------------
-👤 你:_
-```
-
----
-
-### 退出
-
-输入以下任一命令即可退出：
-
-```
-👤 你: 退出
-```
-
-或 `quit` / `exit`。
-
----
-
-## 日常使用流程总结
-
-以后每次使用时只需：
-
-```cmd
-cd /d E:\LCAgent
-langchain_env\Scripts\activate
-cd LCA
-python Agent.py
-```
-
-然后输入你的任务即可。知识库只需在资源文件变更时重建。
-
----
-
-## 单智能体模式（简化版）
-
-如果只需要一个简单的 ReAct Agent（无需多智能体协作），可以使用：
-
-```cmd
-cd /d E:\LCAgent
-langchain_env\Scripts\activate
-cd LCA
-python oneAgent.py
-```
-
-运行后会提示输入任务，执行终端命令前会要求人工确认（输入 `Y` 确认，`N` 取消）：
-
-```
-请输入任务：在LCA目录下创建一个test.txt文件
-是否继续？（Y/N）Y
-✅ Final Answer：文件已创建
-```
-
----
-
-## 知识库管理
-
-### 查询知识库（不调用 LLM）
-
-```cmd
-cd /d E:\LCAgent
-langchain_env\Scripts\activate
-cd LCA
-python test_path.py
-```
-
-运行后输入查询内容，可直接检索路径库和记忆库：
-
-```
-请输入查询内容：路径库|山地
-```
-
-### 自定义资源
-
-编辑 `RAG\资源库.txt`，按格式添加：
-
-```
-资源描述：资源路径
-山地地形：E:/UE_project/DEM/dem_mountain.tif
-沙漠地形：E:/UE_project/DEM/desert.tif
-M4材质：/Game/Materials/M4UE5Master1_Inst.M4UE5Master1_Inst
-```
-
-修改后重建：
-
-```cmd
-python RAG_path.py
-```
-
----
-
-## Unreal Engine 连接测试
-
-确保 UE 端的 MCP 服务运行在 `localhost:13377`，然后测试连接：
-
-```cmd
-cd /d E:\LCAgent
-langchain_env\Scripts\activate
-cd LCA
-python test.py
-```
-
----
-
-## 目录结构
-
-```
-E:\LCAgent\
-├── LCA\                       # 源代码
-│   ├── Agent.py               # 主入口 —— 多智能体系统
-│   ├── oneAgent.py            # 简化版单智能体
-│   ├── config.py              # 统一配置（API 密钥等）
-│   ├── prompt_template.py     # 系统提示词模板
-│   ├── one_prompt_template.py # 单智能体提示词模板
-│   ├── RAG_path.py            # 资源路径向量库（构建 + 检索）
-│   ├── RAG_memory.py          # 对话记忆向量库（构建 + 检索 + 存储）
-│   ├── create_terrain.py      # 地形生成脚本（连接 UE）
-│   ├── create_road.py         # 道路/河流生成脚本（连接 UE）
-│   ├── test.py                # UE 连接测试工具
-│   ├── test_path.py           # 知识库查询工具
-│   └── .env                   # 环境变量（不纳入版本控制）
-├── RAG/                       # RAG 数据
-│   ├── 资源库.txt              # 资源名称 → 路径映射
-│   ├── path_db/               # Chroma 向量库（资源路径）
-│   ├── memory/                # 对话历史
-│   │   └── history.txt
-│   └── memory_db/             # Chroma 向量库（对话记忆）
-├── langchain_env/             # Python 虚拟环境（所有依赖已安装）
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
-## RAG 知识库
-
-项目使用两套独立的 Chroma 向量数据库：
-
-| 数据库 | 存储内容 | 用途 |
-|---|---|---|
-| `path_db` | 资源文件路径（地形 .tif、材质 /Game/...） | 根据自然语言查询找到对应的 UE 资源路径 |
-| `memory_db` | 历史对话记录 | 检索之前的交互历史，辅助上下文理解 |
-
----
-
-## Unreal Engine 通信协议
-
-Agent 通过 TCP 连接 UE 端的 MCP 服务（`localhost:13377`），使用 JSON 格式发送指令：
-
-```json
-{
-  "type": "Landscaping",
-  "params": {
-    "command_type": "DEM",
-    "file_paths": "E:/UE_project/DEM/terrain.tif"
-  }
-}
-```
-
-支持的命令类型：
-
-| 类型 | 子命令 |
-|---|---|
-| `Landscaping` | `DEM`, `Set_Material`, `Execute` |
-| `RoadAuto` | `Actor`, `Paint_Layer`, `Points`, `Execute` |
-| `RiverAuto` | `Actor`, `Paint_Layer`, `Points`, `Width`, `Execute` |
-| `BuildAuto` | `Actor`, `Paint_Layer`, `Points`, `Execute` |
-| `OceanAuto` | `Points`, `Execute` |
-| `Materials` | `Paint_Layer`, `Points`, `Execute` |
-
-## 许可证
-
-Internal research project. Not licensed for redistribution.
-
----
-
-## Streamlit 前端界面
-
-项目已提供一个 Streamlit 前端控制台，可以在浏览器中执行任务、查看日志、修改模型配置、重建 RAG 向量库，并测试 Unreal Engine 连接。
-
-### 启动方式
-
-在 Windows PowerShell 中执行：
+在仓库根目录创建独立环境：
 
 ```powershell
 cd E:\LCAgent
-powershell -ExecutionPolicy Bypass -File .\run_frontend.ps1
+py -3.13 -m venv langchain_env
+.\langchain_env\Scripts\python.exe -m pip install --upgrade pip
+.\langchain_env\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-启动成功后，在浏览器打开：
+如果电脑没有 Python 3.13，可将第一条命令改为 `py -3.11 -m venv langchain_env`。安装完成后验证：
+
+```powershell
+.\langchain_env\Scripts\python.exe -c "import streamlit, docx, pypdf; print('Python dependencies OK')"
+```
+
+## 4. 安装桌面客户端依赖
+
+项目不要求全局安装 pnpm。使用固定版本即可：
+
+```powershell
+cd E:\LCAgent\desktop
+npx --yes pnpm@11.19.0 install
+```
+
+仓库中的 `desktop/.npmrc` 已配置 Electron 镜像。如果安装阶段仍提示 Electron 下载失败，可在当前 PowerShell 窗口执行：
+
+```powershell
+$env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+node .\node_modules\electron\install.js
+Test-Path .\node_modules\electron\dist\electron.exe
+```
+
+最后一条命令返回 `True` 即表示 Electron 已就绪。无需再执行 `npm install`。
+
+## 5. 安装 UE 插件
+
+UE 插件单独维护在 [LandscapeTool-Plugins](https://github.com/yxy123123123123/LandscapeTool-Plugins) 仓库。仓库根目录对应 UE 工程的 `Plugins` 目录，其中包括 `UnrealMCP-master`、`Landscaping`、`RoadAuto`、`RiverAuto` 等插件。
+
+如果是新 UE 工程，建议先把插件仓库克隆到临时目录，再将所需插件文件夹合并到 `<UE工程>\Plugins`，不要覆盖工程中已有的同名插件：
+
+```powershell
+git clone https://github.com/yxy123123123123/LandscapeTool-Plugins.git E:\Temp\LandscapeTool-Plugins
+```
+
+然后：
+
+1. 关闭 UE 编辑器；
+2. 把需要的插件复制到 `<UE工程>\Plugins`；
+3. 使用 Visual Studio 2022 打开 UE 工程生成的 `.sln`；
+4. 选择与工程一致的 Editor/Development 配置并编译；
+5. 启动 UE，在“插件”中确认 UnrealMCP 及其依赖插件已启用；
+6. 重启编辑器，使 UnrealMCP 开始监听 `127.0.0.1:13377`。
+
+当前开发工程的可编辑插件位置是：
 
 ```text
-http://localhost:8501
+E:\UE_project\LandscapeTool\Plugins
 ```
 
-### 前端功能
+`E:\LCAgent\UnrealMCP-master` 仅用于历史版本对照，不再作为可编辑插件源码。
 
-- 查看当前聊天模型和向量模型配置状态
-- 修改 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`
-- 修改 `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`EMBEDDING_MODEL`
-- 输入自然语言任务并执行 Agent
-- 查看 DecisionAgent / RetrievalAgent / CodingAgent 执行日志
-- 测试 UE MCP 服务连接
-- 重建 `path_db` 和 `memory_db`
-- 查看 `RAG/资源库.txt` 和最近对话记忆
+## 6. 启动 Electron 客户端
 
-### 注意事项
+UE 相关操作需要先打开 UE 工程；仅进行模型对话、知识库管理或离线测试时可以不打开 UE。
 
-- 真正执行模型调用前，请先在 `LCA\.env` 中填写真实 API Key。
-- 如果只更换聊天大模型，通常只需要修改 `LLM_*` 三项。
-- 如果更换向量模型，建议重建 `path_db` 和 `memory_db`。
-- UE 相关任务需要确保 Unreal Engine 侧 MCP 服务已启动，并监听 `localhost:13377`。
+```powershell
+cd E:\LCAgent\desktop
+npx --yes pnpm@11.19.0 dev
+```
+
+Electron 主进程会自动启动 `LCA/service.py`，默认服务地址为 `http://127.0.0.1:8765`。请保持启动终端处于打开状态。
+
+默认会依次查找以下 Python：
+
+1. 环境变量 `LCAGENT_PYTHON` 指定的解释器；
+2. 仓库中的 `langchain_env\Scripts\python.exe`；
+3. 仓库中的 `.venv\Scripts\python.exe`；
+4. 系统命令 `python`。
+
+如需使用其他虚拟环境，请在启动前指定：
+
+```powershell
+$env:LCAGENT_PYTHON = "D:\PythonEnvs\lcagent\Scripts\python.exe"
+npx --yes pnpm@11.19.0 dev
+```
+
+启动后应能看到：
+
+- Python 服务状态为正常；
+- 可以添加或打开本地工作区；
+- 可以移除工作区入口（不会删除磁盘上的工程和本地知识数据）；
+- 下拉框能显示已经配置的对话模型；
+- 对话区可以手动压缩上下文或删除当前工作区对话；
+- 知识库页可以创建知识库、上传文档并测试检索；
+- UE 已打开并启用插件时，连接信息类似“工程 LandscapeTool，契约 v1，能力 13 项”；
+- UE 资源页可以读取 `/Game` 等包路径并显示真实资产对象路径；
+- UE 未打开时显示“未连接”，不影响离线功能。
+
+## 7. 启动配置与管理控制台
+
+新增模型、配置 Embedding、生成并审核资源文件夹用途报告或运行状态机任务时，启动 Streamlit 管理控制台：
+
+```powershell
+cd E:\LCAgent
+.\langchain_env\Scripts\python.exe -m streamlit run LCA\frontend_app.py --server.address localhost --browser.gatherUsageStats false
+```
+
+浏览器未自动打开时，访问 `http://localhost:8501`。也可运行：
+
+```powershell
+.\run_frontend.ps1
+```
+
+该脚本以无头方式启动，日志写入 `E:\LCAgent\streamlit.log`。
+
+## 8. 运行测试
+
+Python 离线测试不需要启动 UE，也不会实际执行地形创建：
+
+```powershell
+cd E:\LCAgent
+.\langchain_env\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```
+
+桌面端静态检查与构建：
+
+```powershell
+cd E:\LCAgent\desktop
+npx --yes pnpm@11.19.0 typecheck
+npx --yes pnpm@11.19.0 build
+```
+
+## 9. 配置与数据安全
+
+- API Key 保存在 `LCA/.env`，不要提交到 Git；
+- 模型档案保存在 `LCA/model_profiles.local.json`；
+- Embedding 档案保存在 `LCA/embedding_profiles.local.json`；
+- 工作区知识库和注册表保存在 `.lca_data/workspaces/`；
+- 本地对话记录保存在 `.codex_tmp/workspace_chats.json`；
+- 资源注册表批准后还会写入 UE 工程的 `.lcagent/` 目录。
+
+这些本地配置、密钥和运行数据已被 `.gitignore` 排除。首次公开仓库前仍应执行 `git status`，确认没有误提交真实密钥。
+
+## 10. 后续文档
+
+- [详细使用说明](docs/使用说明.md)
+- [智能体架构技术方案](docs/智能体架构技术方案.md)
+- [UEBox 风格 UE 通信协议第一版](docs/UEBox风格UE通信协议第一版.md)

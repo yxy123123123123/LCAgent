@@ -1,484 +1,396 @@
-import os
+"""LCAgent 单决策模型状态机。
+
+决策模型同时承担规划和编码，但它不能直接访问文件、数据库、Shell 或 UE。
+所有副作用都经过显式状态、结构化动作和确定性工具边界。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
 import re
+from dataclasses import asdict, dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
 import click
-import inspect
-import ast
-import tempfile
-from openai import OpenAI
-from string import Template
-from typing import List, Callable, Tuple, Optional
-import platform
 
-# 统一配置（API 密钥等）
-from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from execution_runtime import ExecutionRuntime
+from knowledge_base import KnowledgeBaseManager
+from model_gateway import ModelGateway
+from prompt_template import decision_state_machine_prompt
+from resource_registry import ResourceRegistry
+from retrieval_service import RetrievalService
 
-# 导入拆分后的提示词
-from prompt_template import (
-    decision_system_prompt,
-    retrieval_system_prompt,
-    coding_system_prompt
-)
-from RAG_path import retrieve as retrieve_path, VECTOR_DB_PATH as PATH_DB_PATH
-from RAG_memory import retrieve as retrieve_memory, VECTOR_DB_PATH as MEMORY_DB_PATH, save_conversation_to_rag
-from script_validation import validate_generated_python
 
-# 获取Agent.py所在目录（核心新增）
-AGENT_DIR = os.path.abspath(os.path.dirname(__file__))
+class AgentState(str, Enum):
+    ANALYZE = "ANALYZE"
+    RETRIEVE = "RETRIEVE"
+    GENERATE = "GENERATE"
+    VALIDATE = "VALIDATE"
+    EXECUTE = "EXECUTE"
+    OBSERVE = "OBSERVE"
+    REPAIR = "REPAIR"
+    FINISH = "FINISH"
 
-# 父类：基础智能体（封装通用逻辑）
-class BaseAgent:
-    def __init__(self, model: str = LLM_MODEL):
-        # Model provider, model name, and credentials are loaded from config.py.
-        self.model = model
-        self.client = OpenAI(
-            base_url=LLM_BASE_URL,
-            api_key=LLM_API_KEY,
-        )
-        # 记录交互历史（所有智能体都需记录）
-        self.conversation_history = []
 
-    def call_model(self, messages: List[dict]) -> str:
-        """通用大模型调用方法"""
-        print(f"\n\n🤔 {self.__class__.__name__} 思考中...")
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-        )
-        content = response.choices[0].message.content
-        # 记录交互历史
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": content
-        })
-        return content
+class StateMachineError(RuntimeError):
+    """状态机动作、格式或步数错误。"""
 
-    def save_conversation(self, user_input: str, agent_output: str):
-        """保存交互历史到记忆库（每次交互都记录）"""
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_input
-        })
-        save_result = save_conversation_to_rag(user_input, agent_output)
-        print(f"\n📝 {save_result}")
 
-    @staticmethod
-    def parse_action(action_str: str) -> Tuple[str, List[str]]:
-        """通用Action解析方法"""
-        match = re.match(r'(\w+)\((.*)\)', action_str, re.DOTALL)
-        if not match:
-            raise ValueError("Invalid function call syntax")
+@dataclass(frozen=True)
+class TraceStep:
+    sequence: int
+    state: str
+    action: str | None
+    status: str
+    detail: Any
 
-        func_name = match.group(1)
-        args_str = match.group(2).strip()
 
-        args = []
-        current_arg = ""
-        in_string = False
-        string_char = None
-        i = 0
-        paren_depth = 0
+@dataclass(frozen=True)
+class AgentRunResult:
+    final_answer: str
+    trace: list[TraceStep]
+    model_steps: int
+    dry_run: bool
 
-        while i < len(args_str):
-            char = args_str[i]
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "final_answer": self.final_answer,
+            "trace": [asdict(item) for item in self.trace],
+            "model_steps": self.model_steps,
+            "dry_run": self.dry_run,
+        }
 
-            if not in_string:
-                if char in ['"', "'"]:
-                    in_string = True
-                    string_char = char
-                    current_arg += char
-                elif char == '(':
-                    paren_depth += 1
-                    current_arg += char
-                elif char == ')':
-                    paren_depth -= 1
-                    current_arg += char
-                elif char == ',' and paren_depth == 0:
-                    args.append(BaseAgent._parse_single_arg(current_arg.strip()))
-                    current_arg = ""
-                else:
-                    current_arg += char
-            else:
-                current_arg += char
-                if char == string_char and (i == 0 or args_str[i - 1] != '\\'):
-                    in_string = False
-                    string_char = None
 
-            i += 1
+def _workspace_id(path: Path) -> str:
+    return hashlib.sha256(str(path).casefold().encode("utf-8")).hexdigest()[:16]
 
-        if current_arg.strip():
-            args.append(BaseAgent._parse_single_arg(current_arg.strip()))
 
-        return func_name, args
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """允许代码围栏，但拒绝标签式动作和非对象 JSON。"""
 
-    @staticmethod
-    def _parse_single_arg(arg_str: str):
-        """通用参数解析方法"""
-        arg_str = arg_str.strip()
-
-        if (arg_str.startswith('"') and arg_str.endswith('"')) or \
-                (arg_str.startswith("'") and arg_str.endswith("'")):
-            inner_str = arg_str[1:-1]
-            inner_str = inner_str.replace('\\"', '"').replace("\\'", "'")
-            inner_str = inner_str.replace('\\n', '\n').replace('\\t', '\t')
-            inner_str = inner_str.replace('\\r', '\r').replace('\\\\', '\\')
-            return inner_str
-
+    clean = text.strip()
+    if clean.startswith("```"):
+        lines = clean.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        clean = "\n".join(lines).strip()
+    decoder = json.JSONDecoder()
+    for start, character in enumerate(clean):
+        if character != "{":
+            continue
         try:
-            return ast.literal_eval(arg_str)
-        except (SyntaxError, ValueError):
-            return arg_str
+            value, _ = decoder.raw_decode(clean[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise StateMachineError("模型输出不是有效的 JSON 对象")
+
+
+class DecisionAgent:
+    """唯一使用聊天大模型的智能体。"""
+
+    ALLOWED_ACTIONS = {
+        "search_assets",
+        "search_knowledge",
+        "write_script",
+        "execute_script",
+        "finish",
+    }
+
+    def __init__(
+        self,
+        project_directory: str,
+        model_profile_id: str | None = None,
+        *,
+        workspace_id: str | None = None,
+        embedding_profile_id: str | None = None,
+        model_gateway: ModelGateway | None = None,
+        retrieval_service: RetrievalService | None = None,
+        execution_runtime: ExecutionRuntime | None = None,
+        max_model_steps: int = 12,
+        max_repairs: int = 3,
+        dry_run: bool = True,
+    ) -> None:
+        project_path = Path(project_directory).resolve()
+        if not project_path.is_dir():
+            raise StateMachineError(f"工作区目录不存在：{project_path}")
+        if max_model_steps < 1 or max_repairs < 0:
+            raise StateMachineError("状态机步数配置无效")
+        self.project_directory = project_path
+        self.workspace_id = workspace_id or _workspace_id(project_path)
+        self.model_profile_id = model_profile_id
+        self.embedding_profile_id = embedding_profile_id
+        self.model_gateway = model_gateway or ModelGateway()
+        if retrieval_service is None:
+            knowledge = KnowledgeBaseManager(self.workspace_id)
+            resources = ResourceRegistry(self.workspace_id)
+            retrieval_service = RetrievalService(knowledge, resources)
+        self.retrieval_service = retrieval_service
+        self.execution_runtime = execution_runtime or ExecutionRuntime()
+        self.max_model_steps = max_model_steps
+        self.max_repairs = max_repairs
+        self.dry_run = dry_run
+        self._authorized_asset_paths: set[str] = set()
+
+    def _runtime_context(self) -> str:
+        try:
+            bases = self.retrieval_service.knowledge_base.list_bases()
+        except Exception as exc:
+            bases = [{"error": str(exc)}]
+        try:
+            resource_stats = self.retrieval_service.resource_registry.stats()
+        except Exception as exc:
+            resource_stats = {"error": str(exc)}
+        context = {
+            "workspace_id": self.workspace_id,
+            "workspace_path": str(self.project_directory),
+            "execution_mode": "dry_run" if self.dry_run else "live",
+            "embedding_profile_id": self.embedding_profile_id,
+            "knowledge_bases": bases,
+            "resource_registry": resource_stats,
+            "generated_scripts_directory": str(self.execution_runtime.scripts_dir),
+        }
+        return json.dumps(context, ensure_ascii=False, indent=2)
 
     @staticmethod
-    def get_operating_system_name():
-        """获取系统名称"""
-        os_map = {
-            "Darwin": "macOS",
-            "Windows": "Windows",
-            "Linux": "Linux"
-        }
-        return os_map.get(platform.system(), "Unknown")
+    def _require_arguments(action: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+        action_name = str(action.get("action") or "").strip()
+        arguments = action.get("arguments", {})
+        if not action_name:
+            raise StateMachineError("模型 JSON 缺少 action")
+        if not isinstance(arguments, dict):
+            raise StateMachineError("模型 JSON 的 arguments 必须是对象")
+        return action_name, dict(arguments)
 
+    @staticmethod
+    def _text_argument(arguments: Mapping[str, Any], name: str) -> str:
+        value = arguments.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise StateMachineError(f"动作参数 {name} 必须是非空字符串")
+        return value.strip()
 
-# 检索智能体（仅调用检索工具）
-class RetrievalAgent(BaseAgent):
-    def __init__(self):
-        super().__init__()
-        # 检索智能体专属工具
-        self.tools = {
-            "retrieve_path_tool": self.retrieve_path_tool,
-            "retrieve_memory_tool": self.retrieve_memory_tool
-        }
+    def _dispatch(
+        self, action_name: str, arguments: dict[str, Any]
+    ) -> tuple[list[TraceStep], Any]:
+        """执行单一结构化动作，并返回该动作内部的状态轨迹。"""
 
-    def retrieve_path_tool(self, query: str) -> str:
-        """路径库检索工具"""
-        if os.path.exists(PATH_DB_PATH):
-            print("\n📚 检索智能体：正在从路径库检索...")
-            path_retrieved = retrieve_path(query, top_k=3)
-            print(f"\n✅ 检索智能体-路径库结果：\n{path_retrieved}")
-            return f"路径检索：{path_retrieved}"
+        steps: list[TraceStep] = []
+        if action_name == "search_assets":
+            query = self._text_argument(arguments, "query")
+            limit = int(arguments.get("limit", 10))
+            asset_class = arguments.get("asset_class")
+            steps.append(
+                TraceStep(0, AgentState.RETRIEVE.value, action_name, "running", {"query": query})
+            )
+            observation = self.retrieval_service.search_assets(
+                query,
+                asset_class=str(asset_class) if asset_class else None,
+                limit=limit,
+            )
+            for item in observation.get("results", []):
+                if isinstance(item, Mapping) and isinstance(item.get("object_path"), str):
+                    self._authorized_asset_paths.add(item["object_path"])
+        elif action_name == "search_knowledge":
+            if not self.embedding_profile_id:
+                raise StateMachineError("未选择 Embedding 模型，无法检索知识库")
+            query = self._text_argument(arguments, "query")
+            top_k = int(arguments.get("top_k", 5))
+            kb_ids = arguments.get("kb_ids")
+            if kb_ids is not None and not isinstance(kb_ids, list):
+                raise StateMachineError("kb_ids 必须是数组或 null")
+            steps.append(
+                TraceStep(0, AgentState.RETRIEVE.value, action_name, "running", {"query": query})
+            )
+            observation = self.retrieval_service.search_knowledge(
+                query,
+                embedding_profile_id=self.embedding_profile_id,
+                kb_ids=kb_ids,
+                top_k=top_k,
+            )
+        elif action_name == "write_script":
+            filename = self._text_argument(arguments, "filename")
+            content = self._text_argument(arguments, "content")
+            self._verify_asset_paths_in_text(content)
+            steps.append(
+                TraceStep(0, AgentState.GENERATE.value, action_name, "running", {"filename": filename})
+            )
+            # 写入函数内部先做 AST 校验，再原子替换文件。
+            observation = self.execution_runtime.write_generated_script(filename, content)
+            steps.append(
+                TraceStep(0, AgentState.VALIDATE.value, action_name, "success", observation)
+            )
+        elif action_name == "execute_script":
+            filename = self._text_argument(arguments, "filename")
+            argv = arguments.get("argv", [])
+            if not isinstance(argv, list):
+                raise StateMachineError("argv 必须是字符串数组")
+            self._verify_asset_paths_in_text("\n".join(str(item) for item in argv))
+            steps.append(
+                TraceStep(
+                    0,
+                    AgentState.EXECUTE.value,
+                    action_name,
+                    "running",
+                    {"filename": filename, "dry_run": self.dry_run},
+                )
+            )
+            observation = self.execution_runtime.execute_generated_script(
+                filename,
+                argv,
+                dry_run=self.dry_run,
+            )
         else:
-            error_msg = f"⚠️ 检索智能体：未找到路径库：{PATH_DB_PATH}"
-            print(f"\n{error_msg}")
-            return error_msg
-
-    def retrieve_memory_tool(self, query: str) -> str:
-        """记忆库检索工具"""
-        if os.path.exists(MEMORY_DB_PATH):
-            print("\n📚 检索智能体：正在从记忆库检索...")
-            memory_retrieved = retrieve_memory(query, top_k=3)
-            print(f"\n✅ 检索智能体-记忆库结果：\n{memory_retrieved}")
-            return f"记忆检索：{memory_retrieved}"
-        else:
-            error_msg = f"⚠️ 检索智能体：未找到记忆库：{MEMORY_DB_PATH}"
-            print(f"\n{error_msg}")
-            return error_msg
-
-    def run(self, user_input: str) -> str:
-        """运行检索智能体"""
-        messages = [
-            {"role": "system", "content": retrieval_system_prompt},
-            {"role": "user", "content": f"<question>{user_input}</question>"}
-        ]
-
-        while True:
-            content = self.call_model(messages)
-            # 解析Thought
-            thought_match = re.search(r"<thought>(.*?)</thought>", content, re.DOTALL)
-            if thought_match:
-                thought = thought_match.group(1)
-                print(f"\n\n💭 检索智能体-Thought: {thought}")
-
-            # 解析Action（执行检索工具）
-            action_match = re.search(r"<action>(.*?)</action>", content, re.DOTALL)
-            if not action_match:
-                raise RuntimeError("检索智能体未输出 <action>")
-            action = action_match.group(1)
-            tool_name, args = self.parse_action(action)
-
-            print(f"\n\n🔧 检索智能体-Action: {tool_name}({', '.join(args)})")
-
-            try:
-                observation = self.tools[tool_name](*args)
-            except Exception as e:
-                observation = f"检索工具执行错误：{str(e)}"
-            print(f"\n\n🔍 检索智能体-Observation：{observation}")
-            return observation
-
-
-# 编码智能体（仅调用文件写入工具）
-class CodingAgent(BaseAgent):
-    def __init__(self):
-        super().__init__()
-        # 编码智能体专属工具
-        self.tools = {
-            "write_to_file": self.write_to_file
-        }
-        # 记录Agent.py所在目录
-        self.agent_dir = AGENT_DIR
-
-    def write_to_file(self, file_path: str, content: str) -> str:
-        """写入并自动校验编码智能体生成的任务脚本。"""
-        try:
-            # 生成文件只能位于 LCA 目录，避免模型修改工程外的任意文件。
-            if not os.path.isabs(file_path):
-                file_path = os.path.join(self.agent_dir, file_path)
-            file_path = os.path.abspath(file_path)
-            if os.path.commonpath([self.agent_dir, file_path]) != self.agent_dir:
-                raise ValueError("编码智能体只能写入 LCA 目录")
-
-            protected_files = {
-                "Agent.py",
-                "create_terrain.py",
-                "terrain_client.py",
-                "script_validation.py",
-                "prompt_template.py",
-            }
-            if os.path.basename(file_path) in protected_files:
-                raise ValueError("编码智能体不能覆盖固定客户端或智能体核心文件")
-            if not os.path.basename(file_path).startswith("generated_"):
-                raise ValueError("生成脚本文件名必须以 generated_ 开头")
-
-            content = content.replace("\\n", "\n")
-            if file_path.lower().endswith(".py"):
-                validate_generated_python(file_path, content)
-
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            # 先写临时文件再原子替换，校验或写入失败时不会破坏上一版脚本。
-            with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                dir=os.path.dirname(file_path),
-                delete=False,
-                suffix=".tmp",
-            ) as temporary_file:
-                temporary_file.write(content)
-                temporary_path = temporary_file.name
-            os.replace(temporary_path, file_path)
-
-            print(f"\n📝 编码智能体：文件写入并通过自动校验 -> {file_path}")
-            return f"文件写入并通过自动校验：{file_path}"
-        except Exception as e:
-            error_msg = f"编码智能体-文件写入失败：{str(e)}"
-            print(f"\n❌ {error_msg}")
-            return error_msg
-
-    def run(self, user_input: str) -> str:
-        """运行编码智能体"""
-        template = Template(coding_system_prompt)
-        custom_prompt = template.substitute(agent_dir=self.agent_dir)
-        messages = [
-            {"role": "system", "content": custom_prompt},
-            {"role": "user", "content": f"<question>{user_input}</question>"}
-        ]
-
-        while True:
-            content = self.call_model(messages)
-            # 解析Thought
-            thought_match = re.search(r"<thought>(.*?)</thought>", content, re.DOTALL)
-            if thought_match:
-                thought = thought_match.group(1)
-                print(f"\n\n💭 编码智能体-Thought: {thought}")
-
-            # 解析Action（执行编码工具）
-            action_match = re.search(r"<action>(.*?)</action>", content, re.DOTALL)
-            if not action_match:
-                raise RuntimeError("编码智能体未输出 <action>")
-            action = action_match.group(1)
-            tool_name, args = self.parse_action(action)
-
-            print(f"\n\n🔧 编码智能体-Action: {tool_name}({', '.join(args)})")
-
-            try:
-                observation = self.tools[tool_name](*args)
-            except Exception as e:
-                observation = f"编码工具执行错误：{str(e)}"
-            print(f"\n\n🔍 编码智能体-Observation：{observation}")
-            return observation
-
-
-# 决策智能体（仅保留终端命令工具，通过标签调用检索/编码智能体）
-class DecisionAgent(BaseAgent):
-    def __init__(self, project_directory: str):
-        super().__init__()
-        self.project_directory = project_directory
-        # 初始化检索/编码智能体（仅作为调用对象，不再加入tools）
-        self.retrieval_agent = RetrievalAgent()
-        self.coding_agent = CodingAgent()
-        # 决策智能体仅保留终端命令执行工具
-        self.tools = {
-            "run_terminal_command": self.run_terminal_command
-        }
-
-    def run_terminal_command(self, command: str) -> str:
-        """终端命令执行工具"""
-        import subprocess
-        run_result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            encoding='utf-8',
-            errors='replace'
+            raise StateMachineError(f"不允许的动作：{action_name}")
+        steps.append(
+            TraceStep(0, AgentState.OBSERVE.value, action_name, "success", observation)
         )
-        if run_result.returncode == 0:
-            return f"终端命令执行成功，输出：{run_result.stdout.strip()}"
-        else:
-            return f"终端命令执行失败，错误信息：{run_result.stderr.strip()}"
+        return steps, observation
 
-    def get_tool_list(self) -> str:
-        """获取工具列表描述"""
-        tool_descriptions = []
-        # 仅展示终端命令工具
-        for func_name, func in self.tools.items():
-            signature = str(inspect.signature(func))
-            doc = inspect.getdoc(func) or "执行终端命令"
-            tool_descriptions.append(f"- {func_name}{signature}: {doc}")
-        # 添加检索/编码智能体的调用说明
-        tool_descriptions.append(
-            "- 调用检索智能体：使用<call_retrieval_agent>查询内容</call_retrieval_agent>标签，参数为查询指令字符串")
-        tool_descriptions.append(
-            "- 调用编码智能体：使用<call_coding_agent>查询内容</call_coding_agent>标签，参数为查询指令字符串")
-        return "\n".join(tool_descriptions)
+    def _verify_asset_paths_in_text(self, text: str) -> None:
+        """阻止模型绕过资源注册表，把猜测的 UE 对象路径交给执行层。"""
 
-    def render_system_prompt(self) -> str:
-        """渲染决策智能体提示词"""
-        tool_list = self.get_tool_list()
-        file_list = ", ".join(
-            os.path.abspath(os.path.join(self.project_directory, f))
-            for f in os.listdir(self.project_directory)
+        candidates = set(
+            re.findall(r"/[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+", text)
         )
-        return Template(decision_system_prompt).substitute(
-            operating_system=self.get_operating_system_name(),
-            tool_list=tool_list,
-            file_list=file_list
+        unauthorized = sorted(candidates - self._authorized_asset_paths)
+        if unauthorized:
+            raise StateMachineError(
+                "脚本或参数包含未经本次 search_assets 确认的 UE 对象路径："
+                + ", ".join(unauthorized)
+            )
+
+    @staticmethod
+    def _renumber(trace: list[TraceStep], items: Sequence[TraceStep]) -> None:
+        for item in items:
+            trace.append(
+                TraceStep(
+                    sequence=len(trace) + 1,
+                    state=item.state,
+                    action=item.action,
+                    status=item.status,
+                    detail=item.detail,
+                )
+            )
+
+    def run_with_trace(self, user_input: str) -> AgentRunResult:
+        task = user_input.strip()
+        if not task:
+            raise StateMachineError("任务不能为空")
+        system_prompt = decision_state_machine_prompt.format(
+            runtime_context=self._runtime_context()
         )
-
-    def run(self, user_input: str) -> str:
-        """运行决策智能体"""
-        # 初始化消息（仅当决策智能体要求时才添加记忆内容）
-        system_prompt = self.render_system_prompt()
-        retrieved_memory_content = ""
-
-        # 检查是否要求检索记忆库（关键词匹配）
-        if any(keyword in user_input for keyword in ["检索记忆", "查看历史", "记忆库"]):
-            print("\n📌 决策智能体：检测到记忆库检索请求")
-            retrieved_memory_content = self.retrieval_agent.retrieve_memory_tool(user_input)
-            if retrieved_memory_content and "未检索到" not in retrieved_memory_content:
-                system_prompt += f"""
-        以下是记忆库检索内容（决策智能体要求检索）：
-        【记忆库内容】
-        {retrieved_memory_content}
-        """
-
-        # 构建对话消息
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"<question>{user_input}</question>"}
+            {"role": "user", "content": task},
         ]
+        trace: list[TraceStep] = []
+        repairs = 0
+        # 每次任务重新建立最小权限集合，禁止沿用上一次任务检索过的路径。
+        self._authorized_asset_paths.clear()
 
-        # 记录交互过程
-        interaction_memory = ""
-        final_answer = ""
-
-        while True:
-            content = self.call_model(messages)
-            interaction_memory += content + "\n"
-
-            # 解析Thought
-            thought_match = re.search(r"<thought>(.*?)</thought>", content, re.DOTALL)
-            if thought_match:
-                thought = thought_match.group(1)
-                print(f"\n\n💭 决策智能体-Thought: {thought}")
-
-            # 解析Final Answer（结束循环）
-            if "<final_answer>" in content:
-                final_answer = re.search(r"<final_answer>(.*?)</final_answer>", content, re.DOTALL).group(1)
-                break
-
-            # 第一步：解析并调用检索智能体
-            retrieval_match = re.search(r"<call_retrieval_agent>(.*?)</call_retrieval_agent>", content, re.DOTALL)
-            if retrieval_match:
-                try:
-                    retrieval_query = retrieval_match.group(1).strip()
-                    print(f"\n\n📞 决策智能体：调用检索智能体，查询：{retrieval_query}")
-                    # 执行检索智能体
-                    retrieval_observation = self.retrieval_agent.run(retrieval_query)
-                    print(f"\n\n🔍 决策智能体-检索智能体返回：{retrieval_observation}")
-                    # 将结果添加到对话消息中
-                    messages.append({"role": "user",
-                                     "content": f"<observation>检索智能体返回：{retrieval_observation}</observation>"})
-                    continue  # 继续循环处理后续逻辑
-                except Exception as e:
-                    retrieval_error = f"检索智能体调用失败：{str(e)}"
-                    print(f"\n\n❌ 决策智能体：{retrieval_error}")
-                    messages.append({"role": "user", "content": f"<observation>{retrieval_error}</observation>"})
-                    continue
-
-            # 第二步：解析并调用编码智能体
-            coding_match = re.search(r"<call_coding_agent>(.*?)</call_coding_agent>", content, re.DOTALL)
-            if coding_match:
-                try:
-                    coding_query = coding_match.group(1).strip()
-                    print(f"\n\n📞 决策智能体：调用编码智能体，查询：{coding_query}")
-                    # 执行编码智能体
-                    coding_observation = self.coding_agent.run(coding_query)
-                    print(f"\n\n🔍 决策智能体-编码智能体返回：{coding_observation}")
-                    # 将结果添加到对话消息中
-                    messages.append(
-                        {"role": "user", "content": f"<observation>编码智能体返回：{coding_observation}</observation>"})
-                    continue  # 继续循环处理后续逻辑
-                except Exception as e:
-                    coding_error = f"编码智能体调用失败：{str(e)}"
-                    print(f"\n\n❌ 决策智能体：{coding_error}")
-                    messages.append({"role": "user", "content": f"<observation>{coding_error}</observation>"})
-                    continue
-
-            # 第三步：解析并执行终端命令（仅保留的工具）
-            action_match = re.search(r"<action>(.*?)</action>", content, re.DOTALL)
-            if not action_match:
-                raise RuntimeError("决策智能体未输出 <action>（终端命令）")
-            action = action_match.group(1)
-            tool_name, args = self.parse_action(action)
-
-            print(f"\n\n🔧 决策智能体-Action: {tool_name}({', '.join(args)})")
-
+        for model_step in range(1, self.max_model_steps + 1):
+            trace.append(
+                TraceStep(
+                    len(trace) + 1,
+                    AgentState.ANALYZE.value,
+                    None,
+                    "running",
+                    {"model_step": model_step},
+                )
+            )
+            reply = self.model_gateway.chat(messages, profile_id=self.model_profile_id)
+            messages.append({"role": "assistant", "content": reply.content})
+            action: dict[str, Any] | None = None
             try:
-                observation = self.tools[tool_name](*args)
-            except Exception as e:
-                observation = f"终端命令执行错误：{str(e)}"
-            print(f"\n\n🔍 决策智能体-Observation：{observation}")
-            obs_msg = f"<observation>{observation}</observation>"
-            messages.append({"role": "user", "content": obs_msg})
+                action = _extract_json_object(reply.content)
+                action_name, arguments = self._require_arguments(action)
+                if action_name not in self.ALLOWED_ACTIONS:
+                    raise StateMachineError(f"不允许的动作：{action_name}")
+                if action_name == "finish":
+                    answer = self._text_argument(arguments, "answer")
+                    trace.append(
+                        TraceStep(
+                            len(trace) + 1,
+                            AgentState.FINISH.value,
+                            action_name,
+                            "success",
+                            {"answer": answer},
+                        )
+                    )
+                    return AgentRunResult(answer, trace, model_step, self.dry_run)
 
-        # 每次交互都记录到记忆库（无论是否检索）
-        self.save_conversation(user_input, interaction_memory)
+                substeps, observation = self._dispatch(action_name, arguments)
+                self._renumber(trace, substeps)
+                # 工具返回只作为用户可见 observation 输入，不混入系统指令。
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "TOOL_OBSERVATION\n"
+                        + json.dumps(observation, ensure_ascii=False),
+                    }
+                )
+            except Exception as exc:
+                repairs += 1
+                detail = {"error_type": type(exc).__name__, "message": str(exc)}
+                trace.append(
+                    TraceStep(
+                        len(trace) + 1,
+                        AgentState.REPAIR.value,
+                        str(action.get("action")) if action else None,
+                        "failed",
+                        detail,
+                    )
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "TOOL_ERROR\n" + json.dumps(detail, ensure_ascii=False),
+                    }
+                )
+                if repairs > self.max_repairs:
+                    raise StateMachineError(
+                        f"状态机修复次数超过上限（{self.max_repairs}）：{exc}"
+                    ) from exc
 
-        return final_answer
+        raise StateMachineError(f"状态机超过最大模型步数：{self.max_model_steps}")
+
+    def run(self, user_input: str) -> str:
+        """保持前端旧调用接口，只返回最终答复。"""
+
+        return self.run_with_trace(user_input).final_answer
 
 
-# 主函数（启动决策智能体）
 @click.command()
-@click.argument('project_directory',
-                type=click.Path(exists=True, file_okay=False, dir_okay=True),
-                default=os.path.abspath(os.path.dirname(__file__)))
-def main(project_directory):
-    project_dir = os.path.abspath(project_directory)
-    # 初始化决策智能体（自动包含检索/编码智能体）
-    decision_agent = DecisionAgent(project_directory=project_dir)
-
-    print("欢迎使用环境搭建助手！")
-    print("📌 规则说明：")
-    print("  - 仅当输入包含「检索记忆/查看历史/记忆库」时，才会检索记忆库内容")
-    print("  - 所有交互都会自动记录到记忆库")
-    print("  - 检索智能体负责路径/记忆检索，编码智能体负责文件写入，决策智能体负责任务调度")
-    while True:
-        task = input("\n👤 你: ")
-        if task in ["退出", "quit", "exit"]:
-            print("🤖 助手: 谢谢使用，再见！")
-            break
-
-        final_answer = decision_agent.run(task)
-        print(f"\n🤖 助手: {final_answer}")
-        print("-" * 80)
+@click.argument(
+    "project_directory",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    default=str(Path(__file__).resolve().parent),
+)
+@click.option("--model-profile-id", default=None)
+@click.option("--embedding-profile-id", default=None)
+@click.option("--live", is_flag=True, help="允许真实连接 UE；默认只做 dry-run。")
+def main(
+    project_directory: str,
+    model_profile_id: str | None,
+    embedding_profile_id: str | None,
+    live: bool,
+) -> None:
+    agent = DecisionAgent(
+        project_directory,
+        model_profile_id,
+        embedding_profile_id=embedding_profile_id,
+        dry_run=not live,
+    )
+    task = input("请输入任务：")
+    result = agent.run_with_trace(task)
+    print(result.final_answer)
+    print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

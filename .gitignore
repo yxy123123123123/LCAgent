@@ -30,6 +30,11 @@ Thumbs.db
 /RAG/memory/
 /RAG/memory_db/
 /RAG/path_db/
+/LCA/model_profiles.local.json
+/LCA/embedding_profiles.local.json
+/LCA/workspaces.local.json
+/.lca_data/
+/.lcagent/
 
 # Unreal Engine generated files
 Binaries/
@@ -38,3 +43,11 @@ DerivedDataCache/
 Intermediate/
 Saved/
 .vs/
+
+# Electron client generated files
+desktop/node_modules/
+desktop/out/
+desktop/dist/
+
+# Third-party reference archives
+/uebox-main.zip

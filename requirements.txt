@@ -2,6 +2,9 @@
 # 安装：pip install -r requirements.txt
 
 openai>=2.0.0
+langchain-core>=1.4.0,<2.0.0
+langchain-deepseek>=1.1.0,<2.0.0
+langchain-openai>=1.1.0,<2.0.0
 langchain-community>=0.4.0
 langchain-text-splitters>=1.1.0
 langchain-chroma>=1.1.0
@@ -11,4 +14,5 @@ python-dotenv>=1.2.0
 PyYAML>=6.0.0
 jsonschema>=4.20.0
 pypdf>=6.0.0
+python-docx>=1.1.2
 streamlit>=1.36.0
