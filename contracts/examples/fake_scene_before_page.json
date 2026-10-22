@@ -1,0 +1,30 @@
+{
+  "source": "fake_ue",
+  "level_id": "/Game/Maps/ValidationMap",
+  "coordinate_system": "UE_LHS_Z_UP",
+  "linear_unit": "cm",
+  "angle_unit": "degree",
+  "id_stability_scope": "persistent",
+  "entities": [
+    {
+      "entity_id": "/Game/Maps/ValidationMap:11111111-1111-1111-1111-111111111111",
+      "name": "LCA_ValidationActor",
+      "class_name": "/Script/Engine.StaticMeshActor",
+      "transform": {
+        "location": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "bounds": {
+        "origin": [0.0, 0.0, 0.0],
+        "extent": [50.0, 50.0, 50.0]
+      },
+      "tags": ["LCA_TEST"]
+    }
+  ],
+  "returned_count": 1,
+  "total_count": 1,
+  "next_cursor": null,
+  "truncated": false,
+  "missing_fields": []
+}

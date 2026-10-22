@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lcagent.local/contracts/repair/repair_scope.schema.json",
+  "title": "LCAgent RepairScope",
+  "type": "object",
+  "required": ["repair_id", "goal_id", "goal_hash", "failed_constraints", "allowed_entities", "allowed_actual_entity_ids", "allowed_operations", "allowed_properties", "allowed_observed_paths", "protected_entities", "protected_actual_entity_ids", "required_revalidation", "remaining_budget"],
+  "properties": {
+    "repair_id": {"type": "string", "pattern": "^repair_[a-f0-9]{16}$"},
+    "goal_id": {"type": "string", "pattern": "^goal_"},
+    "goal_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "failed_constraints": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "allowed_entities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+    "allowed_actual_entity_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "allowed_operations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["create", "update", "delete"]}},
+    "allowed_properties": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+    "allowed_observed_paths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+    "protected_entities": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "protected_actual_entity_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "required_revalidation": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "remaining_budget": {
+      "type": "object",
+      "required": ["goal_repairs", "tool_actions"],
+      "properties": {
+        "goal_repairs": {"type": "integer", "minimum": 0},
+        "tool_actions": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

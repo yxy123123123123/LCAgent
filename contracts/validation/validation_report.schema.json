@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lcagent.local/contracts/validation/validation_report.schema.json",
+  "title": "LCAgent ValidationReport",
+  "type": "object",
+  "required": ["report_id", "goal_id", "goal_hash", "snapshot_id", "before_snapshot_id", "overall_status", "results", "summary"],
+  "properties": {
+    "report_id": {"type": "string", "pattern": "^validation_[a-f0-9]{16}$"},
+    "goal_id": {"type": "string", "pattern": "^goal_"},
+    "goal_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "snapshot_id": {"type": "string", "pattern": "^snapshot_"},
+    "before_snapshot_id": {"type": ["string", "null"]},
+    "overall_status": {"enum": ["passed", "failed", "not_observable", "error"]},
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["constraint_id", "constraint_type", "required", "status", "measured", "expected", "involved_entities", "evidence_refs", "message"],
+        "properties": {
+          "constraint_id": {"type": "string", "minLength": 1},
+          "constraint_type": {"type": "string", "minLength": 1},
+          "required": {"type": "boolean"},
+          "status": {"enum": ["passed", "failed", "not_observable", "error", "skipped"]},
+          "measured": {"type": "object"},
+          "expected": {"type": "object"},
+          "involved_entities": {"type": "array", "items": {"type": "string"}},
+          "evidence_refs": {"type": "array", "items": {"type": "string"}},
+          "message": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["error", "failed", "not_observable", "passed", "skipped"],
+      "properties": {
+        "error": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "not_observable": {"type": "integer", "minimum": 0},
+        "passed": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

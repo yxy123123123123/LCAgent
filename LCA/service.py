@@ -26,6 +26,7 @@ if str(APP_DIR) not in sys.path:
 
 from asset_registry_client import scan_project_assets  # noqa: E402
 from context_compactor import ContextCompactor  # noqa: E402
+from constraint_engine import ConstraintEngine, ConstraintEngineError, ValidationReport  # noqa: E402
 from embedding_gateway import EmbeddingGateway, EmbeddingProfileStore  # noqa: E402
 from goal_compiler import GoalCompiler, GoalCompilerError  # noqa: E402
 from goal_models import GoalSpecError  # noqa: E402
@@ -37,10 +38,14 @@ from knowledge_base import (  # noqa: E402
 )
 from model_gateway import ModelGateway, ModelProfileStore  # noqa: E402
 from observation_planner import ObservationPlanError, ObservationPlanner  # noqa: E402
+from repair_controller import RepairScopeController, RepairScopeError  # noqa: E402
 from resource_folder_report import build_folder_summaries  # noqa: E402
 from resource_registry import ResourceRegistry  # noqa: E402
 from run_manager import RunManager, RunManagerError  # noqa: E402
 from run_store import RunStore, RunStoreError  # noqa: E402
+from scene_diff import SceneDiffError, diff_snapshots  # noqa: E402
+from scene_models import SceneModelError, SceneSnapshot, SceneSnapshotBuilder  # noqa: E402
+from scene_store import SceneRecordStore, SceneStoreError  # noqa: E402
 from ue_protocol import UEProtocolClient  # noqa: E402
 from workspace_store import (  # noqa: E402
     WorkspaceChatStore,
@@ -69,6 +74,7 @@ class LCAgentService:
         run_store: RunStore | None = None,
         run_manager: RunManager | None = None,
         goal_data_root: Path | str | None = None,
+        scene_data_root: Path | str | None = None,
     ) -> None:
         self.workspace_store = WorkspaceStore()
         self.chat_store = WorkspaceChatStore()
@@ -77,6 +83,7 @@ class LCAgentService:
         self.run_store = run_store or (run_manager.run_store if run_manager else RunStore())
         self.run_manager = run_manager or RunManager(self.run_store)
         self.goal_data_root = Path(goal_data_root or DEFAULT_DATA_ROOT)
+        self.scene_data_root = Path(scene_data_root or self.goal_data_root)
 
     def _select_workspace(self, workspace_id: str):
         if not workspace_id.strip():
@@ -96,6 +103,37 @@ class LCAgentService:
     def _goal_store(self, workspace_id: str) -> GoalStore:
         self._select_workspace(workspace_id)
         return GoalStore(workspace_id, data_root=self.goal_data_root)
+
+    def _scene_store(self, workspace_id: str) -> SceneRecordStore:
+        self._select_workspace(workspace_id)
+        return SceneRecordStore(workspace_id, data_root=self.scene_data_root)
+
+    def _attach_run_artifact(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        workspace_id: str,
+        artifact_id: str,
+        event_type: str,
+        document: Mapping[str, Any],
+    ) -> None:
+        """离线场景步骤可选绑定到已有 run，便于实验复核。"""
+
+        run_id = str(payload.get("run_id") or "").strip()
+        if not run_id:
+            return
+        run = self.run_store.get_run(run_id)
+        if run.workspace_id != workspace_id:
+            raise ServiceError("run_id 不属于当前工作区", 409)
+        artifact = self.run_store.write_json_artifact(run_id, artifact_id, document)
+        self.run_store.append_event(
+            run_id,
+            event_type=event_type,
+            phase="VALIDATE_SCENE",
+            status="success",
+            summary={"record_id": artifact_id.removesuffix(".json")},
+            artifact_refs=[artifact["relative_path"]],
+        )
 
     @staticmethod
     def _workspace_system_messages(workspace) -> list[dict[str, str]]:
@@ -329,6 +367,21 @@ class LCAgentService:
             raise ServiceError(str(exc), 404) from exc
         return {"run_id": run_id, "artifacts": artifacts}
 
+    def get_run_artifact(self, run_id: str, artifact_id: str) -> dict[str, Any]:
+        try:
+            document = self.run_store.read_json_artifact(run_id, artifact_id)
+        except RunStoreError as exc:
+            raise ServiceError(str(exc), 404) from exc
+        return {"run_id": run_id, "artifact_id": artifact_id, "document": document}
+
+    def export_run(self, run_id: str) -> dict[str, Any]:
+        """生成包含运行、事件和产物哈希清单的本地 ZIP。"""
+
+        try:
+            return {"export": self.run_store.export_run(run_id)}
+        except RunStoreError as exc:
+            raise ServiceError(str(exc), 404) from exc
+
     def create_goal_draft(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """调用决策模型生成草案；结果必须由用户另行批准。"""
 
@@ -425,6 +478,139 @@ class LCAgentService:
             )
             raise ServiceError(str(exc), status) from exc
         return {"observation_plan": plan.as_dict()}
+
+    def normalize_scene_snapshot(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        query = payload.get("query")
+        pages = payload.get("pages")
+        if not isinstance(query, Mapping) or not isinstance(pages, list):
+            raise ServiceError("query 必须是对象，pages 必须是数组")
+        if not all(isinstance(page, Mapping) for page in pages):
+            raise ServiceError("pages 中的每一项都必须是对象")
+        try:
+            snapshot = SceneSnapshotBuilder().build(query, pages)
+            self._scene_store(workspace_id).save_snapshot(snapshot)
+            self._attach_run_artifact(
+                payload,
+                workspace_id=workspace_id,
+                artifact_id=f"{snapshot.snapshot_id}.json",
+                event_type="scene_snapshot_saved",
+                document=snapshot.as_dict(),
+            )
+        except (SceneModelError, SceneStoreError, RunStoreError) as exc:
+            raise ServiceError(str(exc)) from exc
+        return {"snapshot": snapshot.as_dict()}
+
+    def diff_scene_snapshots(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        before = payload.get("before_snapshot")
+        after = payload.get("after_snapshot")
+        tolerances = payload.get("tolerances") or {}
+        if not isinstance(before, Mapping) or not isinstance(after, Mapping):
+            raise ServiceError("before_snapshot 和 after_snapshot 必须是对象")
+        if not isinstance(tolerances, Mapping):
+            raise ServiceError("tolerances 必须是对象")
+        try:
+            scene_diff = diff_snapshots(
+                SceneSnapshot.from_dict(before),
+                SceneSnapshot.from_dict(after),
+                tolerances=tolerances,
+            )
+            self._scene_store(workspace_id).save_diff(scene_diff)
+            self._attach_run_artifact(
+                payload,
+                workspace_id=workspace_id,
+                artifact_id=f"{scene_diff.diff_id}.json",
+                event_type="scene_diff_saved",
+                document=scene_diff.as_dict(),
+            )
+        except (SceneModelError, SceneDiffError, SceneStoreError, RunStoreError) as exc:
+            raise ServiceError(str(exc)) from exc
+        return {"scene_diff": scene_diff.as_dict()}
+
+    def validate_scene_snapshot(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        goal_id = str(payload.get("goal_id") or "").strip()
+        raw_snapshot = payload.get("snapshot")
+        raw_before = payload.get("before_snapshot")
+        if not goal_id or not isinstance(raw_snapshot, Mapping):
+            raise ServiceError("goal_id 和 snapshot 不能为空")
+        try:
+            goal = self._goal_store(workspace_id).get(goal_id)
+            snapshot = SceneSnapshot.from_dict(raw_snapshot)
+            before = (
+                SceneSnapshot.from_dict(raw_before)
+                if isinstance(raw_before, Mapping)
+                else None
+            )
+            report = ConstraintEngine().validate(
+                goal,
+                snapshot,
+                before_snapshot=before,
+            )
+            self._scene_store(workspace_id).save_validation(report)
+            self._attach_run_artifact(
+                payload,
+                workspace_id=workspace_id,
+                artifact_id=f"{report.report_id}.json",
+                event_type="scene_validation_saved",
+                document=report.as_dict(),
+            )
+        except (
+            GoalStoreError,
+            GoalSpecError,
+            SceneModelError,
+            ConstraintEngineError,
+            SceneStoreError,
+            RunStoreError,
+        ) as exc:
+            raise ServiceError(str(exc)) from exc
+        return {"validation_report": report.as_dict()}
+
+    def create_repair_scope(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        goal_id = str(payload.get("goal_id") or "").strip()
+        raw_report = payload.get("validation_report")
+        raw_snapshot = payload.get("snapshot")
+        if not goal_id or not isinstance(raw_report, Mapping) or not isinstance(raw_snapshot, Mapping):
+            raise ServiceError("goal_id、validation_report 和 snapshot 不能为空")
+        try:
+            goal = self._goal_store(workspace_id).get(goal_id)
+            report = ValidationReport.from_dict(raw_report)
+            snapshot = SceneSnapshot.from_dict(raw_snapshot)
+            scope = RepairScopeController().derive(
+                goal,
+                report,
+                snapshot,
+                remaining_goal_repairs=int(payload.get("remaining_goal_repairs", 1)),
+                remaining_tool_actions=int(payload.get("remaining_tool_actions", 1)),
+            )
+            self._scene_store(workspace_id).save_repair_scope(scope)
+            self._attach_run_artifact(
+                payload,
+                workspace_id=workspace_id,
+                artifact_id=f"{scope.repair_id}.json",
+                event_type="repair_scope_saved",
+                document=scope.as_dict(),
+            )
+        except (
+            GoalStoreError,
+            GoalSpecError,
+            SceneModelError,
+            ConstraintEngineError,
+            RepairScopeError,
+            SceneStoreError,
+            RunStoreError,
+        ) as exc:
+            raise ServiceError(str(exc), 409) from exc
+        return {"repair_scope": scope.as_dict()}
+
+    def list_scene_records(self, workspace_id: str) -> dict[str, Any]:
+        try:
+            records = self._scene_store(workspace_id).list_records()
+        except SceneStoreError as exc:
+            raise ServiceError(str(exc)) from exc
+        return {"workspace_id": workspace_id, **records}
 
     def ue_handshake(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         host = str(payload.get("host") or "127.0.0.1")
@@ -565,8 +751,12 @@ class LCAgentService:
                 return self.get_run_events(run_id, query)
             if len(parts) == 2 and parts[1] == "artifacts" and method == "GET":
                 return self.get_run_artifacts(run_id)
+            if len(parts) == 3 and parts[1] == "artifacts" and method == "GET":
+                return self.get_run_artifact(run_id, parts[2])
             if len(parts) == 2 and parts[1] == "cancel" and method == "POST":
                 return self.cancel_run(run_id)
+            if len(parts) == 2 and parts[1] == "export" and method == "POST":
+                return self.export_run(run_id)
             raise ServiceError("接口不存在", 404)
         if path.startswith("/api/goals/") and path not in {
             "/api/goals/draft",
@@ -598,6 +788,11 @@ class LCAgentService:
         if method == "GET" and path.startswith("/api/workspaces/") and path.endswith("/goals"):
             workspace_id = path[len("/api/workspaces/") : -len("/goals")].strip("/")
             return self.list_goals(workspace_id)
+        if method == "GET" and path.startswith("/api/workspaces/") and path.endswith("/scene-records"):
+            workspace_id = path[
+                len("/api/workspaces/") : -len("/scene-records")
+            ].strip("/")
+            return self.list_scene_records(workspace_id)
         routes = {
             ("GET", "/api/health"): lambda: self.health(),
             ("GET", "/api/workspaces"): lambda: self.list_workspaces(),
@@ -615,6 +810,10 @@ class LCAgentService:
             ("POST", "/api/knowledge-bases/search"): lambda: self.search_knowledge(payload),
             ("POST", "/api/goals/draft"): lambda: self.create_goal_draft(payload),
             ("POST", "/api/goals/save"): lambda: self.save_goal_draft(payload),
+            ("POST", "/api/scene/snapshots/normalize"): lambda: self.normalize_scene_snapshot(payload),
+            ("POST", "/api/scene/diff"): lambda: self.diff_scene_snapshots(payload),
+            ("POST", "/api/scene/validate"): lambda: self.validate_scene_snapshot(payload),
+            ("POST", "/api/scene/repair-scope"): lambda: self.create_repair_scope(payload),
             ("POST", "/api/runs"): lambda: self.create_run(payload),
             ("POST", "/api/tasks"): lambda: self.task(payload),
         }

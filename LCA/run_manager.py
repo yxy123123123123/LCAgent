@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from Agent import AgentCancelledError, DecisionAgent, StateMachineError, TraceStep
+from goal_models import ObservationPlan, SceneGoalSpec, goal_content_hash
 from run_models import (
     RunStatus,
     TaskRun,
@@ -78,6 +79,68 @@ class RunManager:
             summary={"execution_mode": run.execution_mode},
         )
         future = self.executor.submit(self._execute, run.run_id, workspace_path)
+        with self._lock:
+            self._futures[run.run_id] = future
+        future.add_done_callback(
+            lambda completed, current_run_id=run.run_id: self._forget_future(
+                current_run_id, completed
+            )
+        )
+        return run
+
+    def submit_orchestrated(
+        self,
+        *,
+        workspace_id: str,
+        workspace_path: str,
+        goal: SceneGoalSpec,
+        plan: ObservationPlan,
+        orchestrator_factory: Callable[
+            [Callable[[], bool], Callable[[str, Mapping[str, Any]], None]],
+            Any,
+        ],
+        model_profile_id: str | None = None,
+        embedding_profile_id: str | None = None,
+        budgets: Mapping[str, Any] | None = None,
+    ) -> TaskRun:
+        """提交强验证任务；真实 UE 与 Fake UE 通过工厂注入相同接口。"""
+
+        if not Path(workspace_path).is_dir():
+            raise RunManagerError(f"工作区目录不存在：{workspace_path}")
+        goal = SceneGoalSpec.from_dict(goal.as_dict())
+        plan = ObservationPlan.from_dict(plan.as_dict())
+        if (
+            not workspace_id.strip()
+            or not goal.approved
+            or plan.goal_id != goal.goal_id
+            or plan.goal_hash != goal_content_hash(goal.as_dict())
+        ):
+            raise RunManagerError("强验证运行要求已冻结且匹配的目标与观测计划")
+        normalized_budgets = normalize_budgets(budgets)
+        run = TaskRun(
+            run_id=new_run_id(),
+            workspace_id=workspace_id,
+            task_text=goal.task_text,
+            model_profile_id=model_profile_id,
+            embedding_profile_id=embedding_profile_id,
+            execution_mode="live",
+            budgets=normalized_budgets,
+        )
+        self.run_store.create_run(run)
+        self.run_store.append_event(
+            run.run_id,
+            event_type="orchestration_created",
+            phase="PREPARE",
+            status="success",
+            summary={"goal_id": goal.goal_id, "plan_id": plan.plan_id},
+        )
+        future = self.executor.submit(
+            self._execute_orchestrated,
+            run.run_id,
+            goal,
+            plan,
+            orchestrator_factory,
+        )
         with self._lock:
             self._futures[run.run_id] = future
         future.add_done_callback(
@@ -215,6 +278,113 @@ class RunManager:
             )
             return None
 
+    def _execute_orchestrated(
+        self,
+        run_id: str,
+        goal: SceneGoalSpec,
+        plan: ObservationPlan,
+        orchestrator_factory: Callable[
+            [Callable[[], bool], Callable[[str, Mapping[str, Any]], None]],
+            Any,
+        ],
+    ) -> dict[str, Any] | None:
+        try:
+            if self.run_store.is_cancel_requested(run_id):
+                self._finish_cancelled(run_id)
+                return None
+            run = self.run_store.update_run(
+                run_id,
+                status=RunStatus.RUNNING.value,
+                started_at=utc_now(),
+            )
+            self.run_store.append_event(
+                run_id,
+                event_type="orchestration_started",
+                phase="PREPARE",
+                status="success",
+                summary={"goal_id": goal.goal_id},
+            )
+
+            def record_event(event_type: str, summary: Mapping[str, Any]) -> None:
+                self.run_store.append_event(
+                    run_id,
+                    event_type=event_type,
+                    phase="ORCHESTRATE",
+                    status=str(summary.get("status") or "running"),
+                    summary=summary,
+                )
+
+            orchestrator = orchestrator_factory(
+                lambda: self.run_store.is_cancel_requested(run_id),
+                record_event,
+            )
+            result = orchestrator.run(goal, plan=plan, budgets=run.budgets)
+            document = result.as_dict()
+            artifact_refs: list[str] = []
+
+            def save(artifact_id: str, value: Mapping[str, Any]) -> None:
+                artifact = self.run_store.write_json_artifact(run_id, artifact_id, value)
+                artifact_refs.append(artifact["relative_path"])
+
+            save("goal_spec.json", goal.as_dict())
+            save("observation_plan.json", plan.as_dict())
+            for item in document["snapshots"]:
+                save(f"{item['snapshot_id']}.json", item)
+            for item in document["validation_reports"]:
+                save(f"{item['report_id']}.json", item)
+            for item in document["scene_diffs"]:
+                save(f"{item['diff_id']}.json", item)
+            for item in document["repair_scopes"]:
+                save(f"{item['repair_id']}.json", item)
+            save("orchestration_result.json", document)
+
+            if result.status == "cancelled":
+                self._finish_cancelled(run_id)
+                return None
+            final_status = (
+                RunStatus.SUCCEEDED.value
+                if result.status == "succeeded"
+                else RunStatus.FAILED.value
+            )
+            self.run_store.update_run(
+                run_id,
+                status=final_status,
+                termination_reason=result.termination_reason,
+                finished_at=utc_now(),
+                final_answer=(
+                    "场景约束验证通过"
+                    if result.status == "succeeded"
+                    else "场景任务未通过确定性验证"
+                ),
+                error=result.error,
+                metrics=result.metrics,
+            )
+            self.run_store.append_event(
+                run_id,
+                event_type="orchestration_completed",
+                phase="FINISH",
+                status=result.status,
+                summary={"termination_reason": result.termination_reason},
+                artifact_refs=artifact_refs,
+            )
+            return document
+        except Exception as exc:
+            self.run_store.update_run(
+                run_id,
+                status=RunStatus.FAILED.value,
+                termination_reason=TerminationReason.TOOL_ERROR.value,
+                finished_at=utc_now(),
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+            self.run_store.append_event(
+                run_id,
+                event_type="orchestration_failed",
+                phase="FAILED",
+                status="failed",
+                summary={"error_type": type(exc).__name__},
+            )
+            return None
+
     def cancel(self, run_id: str) -> TaskRun:
         try:
             run = self.run_store.request_cancel(run_id)
@@ -242,7 +412,12 @@ class RunManager:
         try:
             return self.run_store.read_json_artifact(run_id, "agent_result.json")
         except RunStoreError as exc:
-            raise RunManagerError(f"运行尚未产生结果：{run_id}") from exc
+            try:
+                return self.run_store.read_json_artifact(
+                    run_id, "orchestration_result.json"
+                )
+            except RunStoreError:
+                raise RunManagerError(f"运行尚未产生结果：{run_id}") from exc
 
     def shutdown(self, *, wait: bool = True) -> None:
         self.executor.shutdown(wait=wait, cancel_futures=False)

@@ -233,10 +233,21 @@ class ServiceRunTests(unittest.TestCase):
         artifacts = self.service.dispatch(
             "GET", {"_path": f"/api/runs/{run_id}/artifacts"}
         )["artifacts"]
+        artifact_document = self.service.dispatch(
+            "GET",
+            {"_path": f"/api/runs/{run_id}/artifacts/agent_result.json"},
+        )["document"]
 
         self.assertEqual("succeeded", run["status"])
         self.assertTrue(all(item["sequence"] > 1 for item in events))
         self.assertEqual("agent_result.json", artifacts[0]["artifact_id"])
+        self.assertEqual("运行完成", artifact_document["final_answer"])
+
+        exported = self.service.dispatch(
+            "POST", {"_path": f"/api/runs/{run_id}/export"}
+        )["export"]
+        self.assertTrue(Path(exported["path"]).is_file())
+        self.assertEqual(64, len(exported["sha256"]))
 
     def test_legacy_task_route_waits_for_new_run(self):
         response = self.service.dispatch(
@@ -336,6 +347,95 @@ class ServiceGoalTests(unittest.TestCase):
                 },
             )
         self.assertEqual(409, raised.exception.status)
+
+    def test_offline_scene_pipeline_persists_snapshot_diff_validation_and_scope(self):
+        saved = self._save_draft()
+        goal_id = saved["goal"]["goal_id"]
+        self.service.dispatch(
+            "POST",
+            {
+                "_path": f"/api/goals/{goal_id}/approve",
+                "workspace_id": self.workspace.workspace_id,
+                "expected_draft_hash": saved["draft_hash"],
+            },
+        )
+        query = {
+            "filter": {"actor_name": "LCA_ValidationActor"},
+            "fields": ["identity", "transform", "bounds", "tags"],
+            "page_size": 200,
+        }
+        before_page = json.loads(
+            (REPO_ROOT / "contracts" / "examples" / "fake_scene_before_page.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        after_page = json.loads(
+            (REPO_ROOT / "contracts" / "examples" / "fake_scene_after_page.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        before = self.service.dispatch(
+            "POST",
+            {
+                "_path": "/api/scene/snapshots/normalize",
+                "workspace_id": self.workspace.workspace_id,
+                "query": query,
+                "pages": [before_page],
+            },
+        )["snapshot"]
+        after = self.service.dispatch(
+            "POST",
+            {
+                "_path": "/api/scene/snapshots/normalize",
+                "workspace_id": self.workspace.workspace_id,
+                "query": query,
+                "pages": [after_page],
+            },
+        )["snapshot"]
+        report = self.service.dispatch(
+            "POST",
+            {
+                "_path": "/api/scene/validate",
+                "workspace_id": self.workspace.workspace_id,
+                "goal_id": goal_id,
+                "snapshot": before,
+            },
+        )["validation_report"]
+        scene_diff = self.service.dispatch(
+            "POST",
+            {
+                "_path": "/api/scene/diff",
+                "workspace_id": self.workspace.workspace_id,
+                "before_snapshot": before,
+                "after_snapshot": after,
+            },
+        )["scene_diff"]
+        scope = self.service.dispatch(
+            "POST",
+            {
+                "_path": "/api/scene/repair-scope",
+                "workspace_id": self.workspace.workspace_id,
+                "goal_id": goal_id,
+                "snapshot": before,
+                "validation_report": report,
+                "remaining_goal_repairs": 2,
+                "remaining_tool_actions": 8,
+            },
+        )["repair_scope"]
+        records = self.service.dispatch(
+            "GET",
+            {
+                "_path": f"/api/workspaces/{self.workspace.workspace_id}/scene-records"
+            },
+        )
+
+        self.assertEqual("failed", report["overall_status"])
+        self.assertEqual("comparable", scene_diff["status"])
+        self.assertEqual(["transform.location.x"], scope["allowed_properties"])
+        self.assertEqual(2, len(records["snapshots"]))
+        self.assertEqual(1, len(records["diffs"]))
+        self.assertEqual(1, len(records["validations"]))
+        self.assertEqual(1, len(records["repair_scopes"]))
 
 
 if __name__ == "__main__":

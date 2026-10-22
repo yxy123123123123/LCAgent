@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
@@ -114,6 +115,39 @@ class RunStoreTests(unittest.TestCase):
         self.assertEqual("***REDACTED***", loaded["nested"]["authorization"])
         self.assertEqual(64, len(record["sha256"]))
         self.assertEqual("result.json", artifacts[0]["artifact_id"])
+
+    def test_export_contains_run_events_artifacts_and_hash_manifest(self):
+        self.store.append_event(
+            self.run.run_id,
+            event_type="export_test",
+            phase="FINISH",
+            status="success",
+        )
+        self.store.write_json_artifact(
+            self.run.run_id,
+            "result.json",
+            {"answer": "ok", "api_key": "must-not-leak"},
+        )
+
+        exported = self.store.export_run(self.run.run_id)
+
+        self.assertEqual(64, len(exported["sha256"]))
+        archive_path = Path(exported["path"])
+        self.assertTrue(archive_path.is_file())
+        with zipfile.ZipFile(archive_path) as archive:
+            self.assertEqual(
+                {
+                    "artifacts/result.json",
+                    "events.jsonl",
+                    "manifest.json",
+                    "run.json",
+                },
+                set(archive.namelist()),
+            )
+            manifest = json.loads(archive.read("manifest.json"))
+            artifact = json.loads(archive.read("artifacts/result.json"))
+        self.assertTrue(manifest["redacted"])
+        self.assertEqual("***REDACTED***", artifact["api_key"])
 
 
 if __name__ == "__main__":

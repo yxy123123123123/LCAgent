@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -12,6 +13,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "LCA"))
 
 from Agent import AgentCancelledError, TraceStep  # noqa: E402
+from goal_compiler import GoalCompiler  # noqa: E402
+from goal_models import SceneGoalSpec, goal_content_hash  # noqa: E402
+from observation_planner import ObservationPlanner  # noqa: E402
 from run_manager import RunManager, RunManagerError  # noqa: E402
 from run_models import RunStatus, TerminationReason  # noqa: E402
 from run_store import RunStore  # noqa: E402
@@ -39,6 +43,37 @@ class SuccessfulAgent:
         self.trace_callback(TraceStep(1, "ANALYZE", None, "running", {"task": task_text}))
         self.trace_callback(TraceStep(2, "FINISH", "finish", "success", {}))
         return FakeResult()
+
+
+class FakeOrchestrationResult:
+    status = "succeeded"
+    termination_reason = TerminationReason.GOAL_SATISFIED.value
+    error = None
+    metrics = {"model_steps": 1, "tool_actions": 1, "goal_repairs": 0}
+
+    def as_dict(self):
+        return {
+            "schema_version": "1.0.0",
+            "status": self.status,
+            "termination_reason": self.termination_reason,
+            "snapshots": [],
+            "validation_reports": [],
+            "scene_diffs": [],
+            "repair_scopes": [],
+            "actions": [],
+            "metrics": self.metrics,
+            "error": self.error,
+        }
+
+
+class FakeOrchestrator:
+    def __init__(self, should_cancel, event_callback):
+        self.should_cancel = should_cancel
+        self.event_callback = event_callback
+
+    def run(self, goal, *, plan, budgets):
+        self.event_callback("fake_observation", {"status": "success"})
+        return FakeOrchestrationResult()
 
 
 class RunManagerTests(unittest.TestCase):
@@ -101,6 +136,57 @@ class RunManagerTests(unittest.TestCase):
         saved = self.store.get_run(run.run_id)
         self.assertEqual(RunStatus.CANCELLED.value, saved.status)
         self.assertEqual(TerminationReason.CANCELLED.value, saved.termination_reason)
+
+    def test_orchestrated_run_persists_reviewable_artifacts(self):
+        draft_document = json.loads(
+            (
+                REPO_ROOT
+                / "contracts"
+                / "examples"
+                / "actor_x_goal_draft.json"
+            ).read_text(encoding="utf-8")
+        )
+        draft = GoalCompiler.compile_document(
+            "设置测试 Actor X 坐标",
+            draft_document,
+            goal_id="goal_run_manager_test",
+        )
+        approved_document = draft.as_dict()
+        frozen_hash = goal_content_hash(approved_document)
+        approved_document["approval"] = {
+            "status": "approved",
+            "draft_hash": frozen_hash,
+            "approved_at": "2026-10-22T00:00:00+00:00",
+            "approved_by": "tester",
+            "frozen_hash": frozen_hash,
+        }
+        goal = SceneGoalSpec.from_dict(approved_document)
+        plan = ObservationPlanner().compile(goal)
+        self.manager = RunManager(self.store, agent_factory=SuccessfulAgent)
+
+        run = self.manager.submit_orchestrated(
+            workspace_id="workspace-test",
+            workspace_path=str(self.workspace),
+            goal=goal,
+            plan=plan,
+            orchestrator_factory=lambda should_cancel, event_callback: FakeOrchestrator(
+                should_cancel, event_callback
+            ),
+        )
+        result = self.manager.wait(run.run_id, timeout=5)
+        artifacts = {
+            item["artifact_id"] for item in self.store.list_artifacts(run.run_id)
+        }
+
+        self.assertEqual("succeeded", result["status"])
+        self.assertEqual(
+            TerminationReason.GOAL_SATISFIED.value,
+            self.store.get_run(run.run_id).termination_reason,
+        )
+        self.assertTrue(
+            {"goal_spec.json", "observation_plan.json", "orchestration_result.json"}
+            <= artifacts
+        )
 
 
 if __name__ == "__main__":

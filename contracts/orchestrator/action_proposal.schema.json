@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lcagent.local/contracts/orchestrator/action_proposal.schema.json",
+  "title": "LCAgent ActionProposal",
+  "type": "object",
+  "required": ["proposal_id", "action_name", "phase", "declared_writes", "payload"],
+  "properties": {
+    "proposal_id": {"type": "string", "pattern": "^proposal_[a-f0-9]{16}$"},
+    "action_name": {"type": "string", "minLength": 1},
+    "phase": {"enum": ["initial", "execution_repair", "goal_repair"]},
+    "declared_writes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["entity_id", "operation", "properties"],
+        "properties": {
+          "entity_id": {"type": "string", "minLength": 1},
+          "operation": {"enum": ["create", "update", "delete"]},
+          "properties": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "payload": {"type": "object"}
+  },
+  "additionalProperties": false
+}

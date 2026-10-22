@@ -65,6 +65,40 @@ interface KnowledgeMatch {
   score: number;
 }
 
+interface SceneGoal {
+  goal_id: string;
+  task_text: string;
+  approval: {
+    status: "draft" | "approved";
+    draft_hash: string;
+    frozen_hash?: string | null;
+  };
+  [key: string]: unknown;
+}
+
+interface TaskRun {
+  run_id: string;
+  task_text: string;
+  status: string;
+  execution_mode: string;
+  created_at: string;
+  termination_reason?: string | null;
+}
+
+interface RunEvent {
+  sequence: number;
+  event_type: string;
+  phase: string;
+  status: string;
+  timestamp: string;
+}
+
+interface RunArtifact {
+  artifact_id: string;
+  byte_size: number;
+  sha256: string;
+}
+
 const workspaces = ref<Workspace[]>([]);
 const activeWorkspaceId = ref("");
 const activeView = ref<ViewName>("chat");
@@ -101,12 +135,31 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 const knowledgeQuery = ref("");
 const knowledgeMatches = ref<KnowledgeMatch[]>([]);
 
+const taskBusy = ref(false);
+const goalTaskText = ref("");
+const goals = ref<SceneGoal[]>([]);
+const selectedGoalId = ref("");
+const goalEditorText = ref("");
+const runs = ref<TaskRun[]>([]);
+const selectedRunId = ref("");
+const runEvents = ref<RunEvent[]>([]);
+const runArtifacts = ref<RunArtifact[]>([]);
+const artifactViewerText = ref("");
+
 const activeWorkspace = computed(() =>
   workspaces.value.find((item) => item.workspace_id === activeWorkspaceId.value),
 );
 
 const currentDocuments = computed(() =>
   knowledgeDocuments.value.filter((item) => item.kb_id === selectedKnowledgeBaseId.value),
+);
+
+const selectedGoal = computed(() =>
+  goals.value.find((item) => item.goal_id === selectedGoalId.value),
+);
+
+const selectedRun = computed(() =>
+  runs.value.find((item) => item.run_id === selectedRunId.value),
 );
 
 const visibleFolders = computed(() =>
@@ -474,6 +527,186 @@ async function searchKnowledge() {
   }
 }
 
+async function loadTaskOverview() {
+  if (!activeWorkspaceId.value) {
+    goals.value = [];
+    runs.value = [];
+    return;
+  }
+  try {
+    const workspaceId = encodeURIComponent(activeWorkspaceId.value);
+    const [goalData, runData] = await Promise.all([
+      api<{ goals: SceneGoal[] }>(`/api/workspaces/${workspaceId}/goals`),
+      api<{ runs: TaskRun[] }>(`/api/runs?workspace_id=${workspaceId}&limit=100`),
+    ]);
+    goals.value = goalData.goals;
+    runs.value = runData.runs;
+    if (!goals.value.some((item) => item.goal_id === selectedGoalId.value)) {
+      selectedGoalId.value = goals.value[0]?.goal_id || "";
+    }
+    if (!runs.value.some((item) => item.run_id === selectedRunId.value)) {
+      selectedRunId.value = runs.value[0]?.run_id || "";
+    }
+    selectGoal(selectedGoalId.value);
+    await loadRunDetails(selectedRunId.value);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function selectGoal(goalId: string) {
+  selectedGoalId.value = goalId;
+  const goal = goals.value.find((item) => item.goal_id === goalId);
+  goalEditorText.value = goal ? JSON.stringify(goal, null, 2) : "";
+}
+
+async function createGoalDraft() {
+  if (!activeWorkspace.value || !goalTaskText.value.trim() || taskBusy.value) return;
+  taskBusy.value = true;
+  beginAction();
+  try {
+    const data = await api<{ goal: SceneGoal }>("/api/goals/draft", "POST", {
+      workspace_id: activeWorkspace.value.workspace_id,
+      profile_id: selectedProfileId.value || undefined,
+      task_text: goalTaskText.value.trim(),
+    });
+    goalTaskText.value = "";
+    await loadTaskOverview();
+    selectGoal(data.goal.goal_id);
+    noticeMessage.value = "目标草案已生成。请逐项审核约束，确认无误后再冻结。";
+  } catch (error) {
+    showError(error);
+  } finally {
+    taskBusy.value = false;
+  }
+}
+
+async function saveGoalDraft() {
+  if (!activeWorkspace.value || !goalEditorText.value.trim() || taskBusy.value) return;
+  taskBusy.value = true;
+  beginAction();
+  try {
+    const goal = JSON.parse(goalEditorText.value) as SceneGoal;
+    const data = await api<{ goal: SceneGoal }>("/api/goals/save", "POST", {
+      workspace_id: activeWorkspace.value.workspace_id,
+      goal,
+    });
+    await loadTaskOverview();
+    selectGoal(data.goal.goal_id);
+    noticeMessage.value = "用户编辑后的目标草案已重新校验并保存。";
+  } catch (error) {
+    showError(error);
+  } finally {
+    taskBusy.value = false;
+  }
+}
+
+async function approveGoal() {
+  const goal = selectedGoal.value;
+  if (!activeWorkspace.value || !goal || taskBusy.value) return;
+  if (!window.confirm("冻结后不能覆盖该目标。确认约束、容差和保护对象均已审核？")) return;
+  taskBusy.value = true;
+  beginAction();
+  try {
+    await api(`/api/goals/${goal.goal_id}/approve`, "POST", {
+      workspace_id: activeWorkspace.value.workspace_id,
+      expected_draft_hash: goal.approval.draft_hash,
+      approved_by: "desktop-user",
+    });
+    await loadTaskOverview();
+    selectGoal(goal.goal_id);
+    noticeMessage.value = "目标已按内容哈希冻结，后续执行只能使用这个已审核版本。";
+  } catch (error) {
+    showError(error);
+  } finally {
+    taskBusy.value = false;
+  }
+}
+
+async function buildObservationPlan() {
+  const goal = selectedGoal.value;
+  if (!activeWorkspace.value || !goal || taskBusy.value) return;
+  taskBusy.value = true;
+  beginAction();
+  try {
+    const data = await api<{ observation_plan: { plan_id: string; queries: unknown[] } }>(
+      `/api/goals/${goal.goal_id}/observation-plan`,
+      "POST",
+      { workspace_id: activeWorkspace.value.workspace_id },
+    );
+    noticeMessage.value = `观测计划已生成：${data.observation_plan.plan_id}，共 ${data.observation_plan.queries.length} 个查询。`;
+  } catch (error) {
+    showError(error);
+  } finally {
+    taskBusy.value = false;
+  }
+}
+
+async function loadRunDetails(runId: string) {
+  selectedRunId.value = runId;
+  artifactViewerText.value = "";
+  if (!runId) {
+    runEvents.value = [];
+    runArtifacts.value = [];
+    return;
+  }
+  try {
+    const [eventData, artifactData] = await Promise.all([
+      api<{ events: RunEvent[] }>(`/api/runs/${runId}/events`),
+      api<{ artifacts: RunArtifact[] }>(`/api/runs/${runId}/artifacts`),
+    ]);
+    runEvents.value = eventData.events;
+    runArtifacts.value = artifactData.artifacts;
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function viewRunArtifact(artifactId: string) {
+  if (!selectedRunId.value) return;
+  beginAction();
+  try {
+    const data = await api<{ document: unknown }>(
+      `/api/runs/${selectedRunId.value}/artifacts/${encodeURIComponent(artifactId)}`,
+    );
+    artifactViewerText.value = JSON.stringify(data.document, null, 2);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function cancelSelectedRun() {
+  if (!selectedRun.value || taskBusy.value) return;
+  taskBusy.value = true;
+  beginAction();
+  try {
+    await api(`/api/runs/${selectedRun.value.run_id}/cancel`, "POST");
+    await loadTaskOverview();
+    noticeMessage.value = "已提交取消请求；编排器会在下一个安全边界停止。";
+  } catch (error) {
+    showError(error);
+  } finally {
+    taskBusy.value = false;
+  }
+}
+
+async function exportSelectedRun() {
+  if (!selectedRun.value || taskBusy.value) return;
+  taskBusy.value = true;
+  beginAction();
+  try {
+    const data = await api<{ export: { path: string; sha256: string } }>(
+      `/api/runs/${selectedRun.value.run_id}/export`,
+      "POST",
+    );
+    noticeMessage.value = `运行包已导出：${data.export.path}（SHA-256 ${data.export.sha256.slice(0, 12)}…）`;
+  } catch (error) {
+    showError(error);
+  } finally {
+    taskBusy.value = false;
+  }
+}
+
 // 对话记录在独立容器中滚动；切换工作区或收到新消息后始终展示最新内容。
 async function scrollMessagesToBottom() {
   await nextTick();
@@ -485,11 +718,13 @@ watch(activeWorkspaceId, () => {
   void loadMessages();
   if (activeView.value === "resources") void loadResourceOverview();
   if (activeView.value === "knowledge") void loadKnowledgeOverview();
+  if (activeView.value === "tasks") void loadTaskOverview();
 });
 watch(activeView, (view) => {
   beginAction();
   if (view === "resources") void loadResourceOverview();
   if (view === "knowledge") void loadKnowledgeOverview();
+  if (view === "tasks") void loadTaskOverview();
 });
 watch(
   [activeWorkspaceId, () => messages.value.length, busy],
@@ -598,6 +833,101 @@ onMounted(() => void loadInitialData());
           </div>
         </template>
 
+        <div v-else-if="activeView === 'tasks'" class="feature-page">
+          <div class="feature-header">
+            <div>
+              <div class="eyebrow">REVIEWABLE TASKS</div>
+              <h1>目标审核与运行记录</h1>
+              <p>模型只生成目标草案；用户冻结约束后，系统才允许进入确定性观测、验证和受限修复链路。</p>
+            </div>
+            <button class="toolbar-button" :disabled="taskBusy || !activeWorkspace" @click="loadTaskOverview">刷新</button>
+          </div>
+          <div class="feature-scroll">
+            <section class="control-card goal-create-row">
+              <textarea v-model="goalTaskText" placeholder="描述场景目标、必须满足的约束和不能改变的对象…"></textarea>
+              <button class="primary-button" :disabled="taskBusy || !goalTaskText.trim() || !activeWorkspace" @click="createGoalDraft">
+                {{ taskBusy ? "处理中…" : "生成目标草案" }}
+              </button>
+            </section>
+
+            <div class="task-grid">
+              <section class="data-card task-column">
+                <div class="section-heading"><h2>SceneGoalSpec</h2><span>{{ goals.length }} 个目标</span></div>
+                <div v-if="!goals.length" class="inline-empty">还没有目标草案。</div>
+                <div v-else class="goal-list">
+                  <button
+                    v-for="goal in goals"
+                    :key="goal.goal_id"
+                    class="goal-list-item"
+                    :class="{ active: selectedGoalId === goal.goal_id }"
+                    @click="selectGoal(goal.goal_id)"
+                  >
+                    <span>{{ goal.task_text }}</span>
+                    <em :class="goal.approval.status">{{ goal.approval.status === "approved" ? "已冻结" : "待审核" }}</em>
+                  </button>
+                </div>
+              </section>
+              <section class="data-card task-column goal-editor-card">
+                <div class="section-heading"><h2>结构化约束</h2><span>{{ selectedGoal?.goal_id || "未选择" }}</span></div>
+                <textarea v-model="goalEditorText" class="json-editor" spellcheck="false" :readonly="selectedGoal?.approval.status === 'approved'"></textarea>
+                <div class="button-row">
+                  <button class="toolbar-button" :disabled="taskBusy || !selectedGoal || selectedGoal.approval.status === 'approved'" @click="saveGoalDraft">校验并保存</button>
+                  <button class="primary-button" :disabled="taskBusy || !selectedGoal || selectedGoal.approval.status === 'approved'" @click="approveGoal">审核并冻结</button>
+                  <button class="toolbar-button" :disabled="taskBusy || selectedGoal?.approval.status !== 'approved'" @click="buildObservationPlan">生成观测计划</button>
+                </div>
+              </section>
+            </div>
+
+            <section class="data-card">
+              <div class="section-heading"><h2>运行历史</h2><span>服务重启后仍可查询</span></div>
+              <div v-if="!runs.length" class="inline-empty">当前工作区还没有运行记录。真实强验证执行将在 UE 通用场景查询接入后启用。</div>
+              <div v-else class="run-layout">
+                <div class="run-list">
+                  <button
+                    v-for="run in runs"
+                    :key="run.run_id"
+                    class="run-list-item"
+                    :class="{ active: selectedRunId === run.run_id }"
+                    @click="loadRunDetails(run.run_id)"
+                  >
+                    <span><strong>{{ run.task_text }}</strong><small>{{ run.run_id }} · {{ run.execution_mode }}</small></span>
+                    <em :class="run.status">{{ run.status }}</em>
+                  </button>
+                </div>
+                <div class="run-detail">
+                  <div class="button-row run-actions">
+                    <button class="toolbar-button danger" :disabled="!selectedRun || ['succeeded', 'failed', 'cancelled'].includes(selectedRun.status)" @click="cancelSelectedRun">取消</button>
+                    <button class="toolbar-button" :disabled="!selectedRun" @click="exportSelectedRun">导出运行包</button>
+                  </div>
+                  <div v-if="selectedRun" class="run-summary">
+                    <strong>{{ selectedRun.status }}</strong>
+                    <span>{{ selectedRun.termination_reason || "运行尚未终止" }}</span>
+                  </div>
+                  <div class="run-detail-grid">
+                    <div>
+                      <h3>事件</h3>
+                      <div class="compact-list">
+                        <div v-for="event in runEvents" :key="event.sequence">
+                          <span>#{{ event.sequence }} · {{ event.phase }}</span><em>{{ event.event_type }} / {{ event.status }}</em>
+                        </div>
+                      </div>
+                    </div>
+                    <div>
+                      <h3>可复核产物</h3>
+                      <div class="compact-list artifact-list">
+                        <button v-for="artifact in runArtifacts" :key="artifact.artifact_id" @click="viewRunArtifact(artifact.artifact_id)">
+                          <span>{{ artifact.artifact_id }}</span><em>{{ artifact.byte_size }} B</em>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <textarea v-if="artifactViewerText" v-model="artifactViewerText" class="json-viewer" readonly spellcheck="false"></textarea>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+
         <div v-else-if="activeView === 'resources'" class="feature-page">
           <div class="feature-header">
             <div><div class="eyebrow">UE ASSET REGISTRY</div><h1>UE 工程资源</h1><p>从已连接 UE 的 Asset Registry 读取权威对象路径并保存到当前工作区。</p></div>
@@ -667,7 +997,7 @@ onMounted(() => void loadInitialData());
         </div>
 
         <div v-else class="feature-page placeholder-page">
-          <div class="empty-state"><div class="empty-icon">◇</div><h2>{{ activeView === 'tasks' ? '任务面板正在迁移' : '设置面板正在迁移' }}</h2><p>当前功能仍可在 Streamlit 管理控制台中使用。</p></div>
+          <div class="empty-state"><div class="empty-icon">◇</div><h2>设置面板正在迁移</h2><p>当前功能仍可在 Streamlit 管理控制台中使用。</p></div>
         </div>
       </main>
 

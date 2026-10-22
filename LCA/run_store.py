@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -451,3 +452,78 @@ class RunStore:
         if self.artifacts_root.resolve() not in path.parents:
             raise RunStoreError("运行产物路径越界")
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def export_run(self, run_id: str) -> dict[str, Any]:
+        """导出可复核运行包；清单记录每个文件的内容哈希。"""
+
+        run = self.get_run(run_id)
+        events = [item.as_dict() for item in self.list_events(run_id)]
+        artifacts = self.list_artifacts(run_id)
+        files: dict[str, bytes] = {
+            "run.json": (
+                json.dumps(redact_sensitive(run.as_dict()), ensure_ascii=False, indent=2)
+                + "\n"
+            ).encode("utf-8"),
+            "events.jsonl": (
+                "\n".join(
+                    json.dumps(redact_sensitive(item), ensure_ascii=False)
+                    for item in events
+                )
+                + ("\n" if events else "")
+            ).encode("utf-8"),
+        }
+        root = self.artifacts_root.resolve()
+        for artifact in artifacts:
+            source = (root / artifact["relative_path"]).resolve()
+            if root not in source.parents or not source.is_file():
+                raise RunStoreError(
+                    f"运行产物缺失或路径越界：{artifact['artifact_id']}"
+                )
+            payload = source.read_bytes()
+            if hashlib.sha256(payload).hexdigest() != artifact["sha256"]:
+                raise RunStoreError(f"运行产物哈希不一致：{artifact['artifact_id']}")
+            files[f"artifacts/{artifact['artifact_id']}"] = payload
+
+        manifest = {
+            "schema_version": "1.0.0",
+            "run_id": run_id,
+            "generated_at": utc_now(),
+            "redacted": True,
+            "files": [
+                {
+                    "path": name,
+                    "byte_size": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+                for name, payload in sorted(files.items())
+            ],
+        }
+        manifest_payload = (
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
+
+        export_directory = (root / run_id / "exports").resolve()
+        if root not in export_directory.parents:
+            raise RunStoreError("运行导出目录越界")
+        export_directory.mkdir(parents=True, exist_ok=True)
+        target = export_directory / f"{run_id}.zip"
+        temporary = export_directory / f".{run_id}.zip.tmp"
+        try:
+            with zipfile.ZipFile(
+                temporary, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                for name, payload in sorted(files.items()):
+                    archive.writestr(name, payload)
+                archive.writestr("manifest.json", manifest_payload)
+            os.replace(temporary, target)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        archive_payload = target.read_bytes()
+        return {
+            "run_id": run_id,
+            "path": str(target),
+            "byte_size": len(archive_payload),
+            "sha256": hashlib.sha256(archive_payload).hexdigest(),
+            "manifest": manifest,
+        }

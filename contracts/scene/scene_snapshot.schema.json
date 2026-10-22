@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lcagent.local/contracts/scene/scene_snapshot.schema.json",
+  "title": "LCAgent SceneSnapshot",
+  "type": "object",
+  "required": ["snapshot_id", "content_hash", "source", "level_id", "captured_at", "query", "completeness", "coordinate_system", "linear_unit", "angle_unit", "entities"],
+  "properties": {
+    "snapshot_id": {"type": "string", "pattern": "^snapshot_[a-f0-9]{16}$"},
+    "content_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source": {"type": "string", "minLength": 1},
+    "level_id": {"type": "string", "minLength": 1},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "query": {"type": "object"},
+    "completeness": {
+      "type": "object",
+      "required": ["complete", "truncated", "missing_fields", "returned_count", "total_count", "page_count"],
+      "properties": {
+        "complete": {"type": "boolean"},
+        "truncated": {"type": "boolean"},
+        "missing_fields": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "returned_count": {"type": "integer", "minimum": 0},
+        "total_count": {"type": ["integer", "null"], "minimum": 0},
+        "page_count": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "coordinate_system": {"type": "string", "minLength": 1},
+    "linear_unit": {"type": "string", "minLength": 1},
+    "angle_unit": {"type": "string", "minLength": 1},
+    "entities": {"type": "array", "items": {"$ref": "#/$defs/entity"}}
+  },
+  "$defs": {
+    "vec3": {
+      "type": "object",
+      "required": ["x", "y", "z"],
+      "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "z": {"type": "number"}},
+      "additionalProperties": false
+    },
+    "entity": {
+      "type": "object",
+      "required": ["entity_id", "stability_scope", "level_id", "available_fields"],
+      "properties": {
+        "entity_id": {"type": "string", "minLength": 1},
+        "stability_scope": {"enum": ["persistent", "session", "query"]},
+        "level_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string"},
+        "class_name": {"type": "string"},
+        "asset_reference": {"type": "string"},
+        "parent_id": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "components": {"type": "array", "items": {"type": "object"}},
+        "properties": {"type": "object"},
+        "transform": {
+          "type": "object",
+          "properties": {"location": {"$ref": "#/$defs/vec3"}, "rotation": {"$ref": "#/$defs/vec3"}, "scale": {"$ref": "#/$defs/vec3"}},
+          "additionalProperties": false
+        },
+        "bounds": {
+          "type": "object",
+          "properties": {"origin": {"$ref": "#/$defs/vec3"}, "extent": {"$ref": "#/$defs/vec3"}},
+          "additionalProperties": false
+        },
+        "available_fields": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "field_sources": {"type": "object", "additionalProperties": {"type": "string"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
